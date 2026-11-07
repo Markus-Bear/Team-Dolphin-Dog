@@ -66,7 +66,7 @@ type LegendItem struct {
 
 // Sizes and positions, in screen pixels unless marked.
 const (
-	windowWidth   = 1380 // the map, then the graphs (graphs.go) on the right
+	windowWidth   = 1440 // the map, then the graphs (graphs.go) on the right
 	windowHeight  = 922
 	plotLeft      = 20  // the map area's left edge
 	plotTop       = 70  // the map area's top edge, below the legend
