@@ -100,8 +100,8 @@ func (p *picker) add(pixel int, people float64) {
 }
 
 // pick returns a random pixel; one with twice the people is twice as likely.
-func (p *picker) pick() int {
-	r := rand.Float64() * p.cumulative[len(p.cumulative)-1]    // a random person
+func (p *picker) pick(rng *rand.Rand) int {
+	r := rng.Float64() * p.cumulative[len(p.cumulative)-1]     // a random person
 	return int(p.pixels[sort.SearchFloat64s(p.cumulative, r)]) // the pixel they live in
 }
 
@@ -285,15 +285,15 @@ func (m *Map) fineCountyAt(x, y float64) int {
 }
 
 // RandomHome picks a random spot in a populated place, weighted by population.
-func (m *Map) RandomHome() (float64, float64) {
-	p := m.homes.pick()
-	return float64(p%m.W) + rand.Float64(), float64(p/m.W) + rand.Float64() // somewhere inside that km square
+func (m *Map) RandomHome(rng *rand.Rand) (float64, float64) {
+	p := m.homes.pick(rng)
+	return float64(p%m.W) + rng.Float64(), float64(p/m.W) + rng.Float64() // somewhere inside that km square
 }
 
 // TripDestination picks a populated place within maxDist, or false if none was found.
-func (m *Map) TripDestination(x, y, maxDist float64) (float64, float64, bool) {
+func (m *Map) TripDestination(rng *rand.Rand, x, y, maxDist float64) (float64, float64, bool) {
 	for try := 0; try < 20; try++ { // up to 20 tries
-		dx, dy := m.RandomHome()
+		dx, dy := m.RandomHome(rng)
 		if (dx-x)*(dx-x)+(dy-y)*(dy-y) <= maxDist*maxDist { // close enough
 			return dx, dy, true
 		}

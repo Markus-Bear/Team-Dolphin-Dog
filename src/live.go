@@ -110,6 +110,7 @@ type Game struct {
 	bg        int              // which background is shown
 	view      view             // dots or one of the area views
 	bgImages  []*ebiten.Image  // made the first time each background is shown
+	seed      uint64           // the current outbreak's seed
 	font      *text.GoTextFace // for all text
 	smallFont *text.GoTextFace // for county names
 	stepTimer float64          // fraction of a day waiting to be simulated
@@ -148,9 +149,9 @@ func (g *Game) resetView() {
 	g.centerX, g.centerY = float64(g.m.W)/2, float64(g.m.H)/2 // the middle of the map
 }
 
-// restart begins a new outbreak with the current era (R and Y).
+// restart begins a new outbreak with the current era and seed (R and Y).
 func (g *Game) restart() {
-	g.world = newWorld(g.m, eras[g.era])
+	g.world = newWorld(g.m, eras[g.era], g.seed)
 	g.stepTimer = 0
 }
 
@@ -173,9 +174,10 @@ func (g *Game) Update() error {
 	case inpututil.IsKeyJustPressed(ebiten.KeySpace):
 		g.paused = !g.paused // pause or carry on
 	case inpututil.IsKeyJustPressed(ebiten.KeyR):
-		g.restart() // a new outbreak
+		g.seed = randomSeed() // a new outbreak
+		g.restart()
 	case inpututil.IsKeyJustPressed(ebiten.KeyY):
-		g.era = (g.era + 1) % len(eras) // the other era
+		g.era = (g.era + 1) % len(eras) // the other era, same seed, so the two can be compared
 		g.restart()
 	case inpututil.IsKeyJustPressed(ebiten.KeyB):
 		g.bg = (g.bg + 1) % len(g.m.Backgrounds) // the next background
@@ -645,8 +647,9 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 
 // ---------- Starting the window ----------
 
-// runLive runs the window until it is closed and returns the last simulation.
-func runLive(m *Map) *World {
+// runLive runs the window until it is closed and returns the last simulation. The first
+// outbreak uses the given seed.
+func runLive(m *Map, seed uint64) *World {
 	src, err := text.NewGoTextFaceSource(bytes.NewReader(goregular.TTF)) // load the built-in font
 	if err != nil {
 		log.Fatal(err)
@@ -658,6 +661,7 @@ func runLive(m *Map) *World {
 
 	g := &Game{
 		m:         m,
+		seed:      seed,
 		font:      &text.GoTextFace{Source: src, Size: 15},
 		smallFont: &text.GoTextFace{Source: src, Size: 12},
 		bgImages:  make([]*ebiten.Image, len(m.Backgrounds)), // one empty slot per background

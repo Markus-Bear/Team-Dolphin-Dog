@@ -109,8 +109,8 @@ func (w *World) updateStage() {
 
 // seekCare decides which day a newly ill person goes to a doctor. With pneumonic plague, waiting
 // a day or two is usually fatal.
-func (w *World) seekCare(a *Agent) {
-	if rand.Float64() < neverSeek { // some people never go
+func (w *World) seekCare(a *Agent, rng *rand.Rand) {
+	if rng.Float64() < neverSeek { // some people never go
 		a.SeekDay = 1 << 30 // a day that never comes
 		return
 	}
@@ -118,9 +118,9 @@ func (w *World) seekCare(a *Agent) {
 	if a.State == Pneumonic { // pneumonic plague
 		d = seekPneumonic // feels worse, so they go sooner
 	}
-	days := float64(d[0] + rand.IntN(d[1]-d[0]+1)) // a random delay between the shortest and longest
-	if rand.Float64() < costBarrier {              // put off by the cost of a GP visit
-		days += float64(costDelay[0] + rand.IntN(costDelay[1]-costDelay[0]+1)) // so they wait longer
+	days := float64(d[0] + rng.IntN(d[1]-d[0]+1)) // a random delay between the shortest and longest
+	if rng.Float64() < costBarrier {              // put off by the cost of a GP visit
+		days += float64(costDelay[0] + rng.IntN(costDelay[1]-costDelay[0]+1)) // so they wait longer
 	}
 	if w.Stage >= Emergency { // the outbreak is in the news
 		days *= alertSpeedUp // so people go sooner
@@ -130,15 +130,17 @@ func (w *World) seekCare(a *Agent) {
 
 // diagnose treats sick people who have seen a doctor and been recognised, traces contacts of
 // pneumonic cases, and starts pest control around each case. The first diagnosis starts the
-// official response.
+// official response. It runs on one core, in order, with one stream of random numbers per day,
+// because hospital beds go to whoever is diagnosed first.
 func (w *World) diagnose() {
-	var newPneumonic []*Agent // today's diagnosed pneumonic cases, whose contacts will be traced
-	for i := range w.Agents { // look at everyone
+	rng := newStream(w.Seed, w.Day, stepResponse, 0) // today's random numbers for diagnosis and tracing
+	var newPneumonic []*Agent                        // today's diagnosed pneumonic cases, whose contacts will be traced
+	for i := range w.Agents {                        // look at everyone
 		a := &w.Agents[i]
 		if !a.sick() || a.Treated || w.Day < a.SeekDay { // not ill, already treated, or not at a doctor yet
 			continue
 		}
-		if rand.Float64() >= diagnoseChance[w.Stage] && !a.quarantined(w.Day) { // the doctor doesn't recognise plague today (quarantined contacts are checked for it daily)
+		if rng.Float64() >= diagnoseChance[w.Stage] && !a.quarantined(w.Day) { // the doctor doesn't recognise plague today (quarantined contacts are checked for it daily)
 			continue
 		}
 		if w.FirstCaseDay < 0 { // this is the first case ever confirmed
@@ -158,7 +160,7 @@ func (w *World) diagnose() {
 		w.startPestControl(a.X, a.Y) // send pest control to where they are
 	}
 	if contactTracing { // switched on in main.go
-		w.traceContacts(newPneumonic) // give today's cases' close contacts antibiotics
+		w.traceContacts(newPneumonic, rng) // give today's cases' close contacts antibiotics
 	}
 }
 
@@ -168,7 +170,7 @@ func (w *World) diagnose() {
 // them, the people they infected first (those are who tracing is meant to find), then whoever was
 // nearest. Each contact gets 7 days of preventive antibiotics, so anyone incubating pneumonic
 // plague never falls ill, and is quarantined at home for 7 days with a daily check.
-func (w *World) traceContacts(cases []*Agent) {
+func (w *World) traceContacts(cases []*Agent, rng *rand.Rand) {
 	r := traceRadius * pneumonicRadius // how close counts as a close contact, in km
 	for _, c := range cases {
 		var near []int // everyone close to this case who can still be traced
@@ -193,12 +195,12 @@ func (w *World) traceContacts(cases []*Agent) {
 		})
 		for _, i := range near[:min(len(near), contactsPerCase)] {
 			a := &w.Agents[i]
-			if rand.Float64() >= traceShare[w.Stage] { // not reached in time
+			if rng.Float64() >= traceShare[w.Stage] { // not reached in time
 				continue
 			}
 			if a.State == ExposedPneumonic {
-				a.Become(Susceptible) // antibiotics stop the infection
-				w.Prevented++         // count for the status line
+				a.Become(Susceptible, rng) // antibiotics stop the infection
+				w.Prevented++              // count for the status line
 			}
 			w.quarantine(a) // home for 7 days
 		}

@@ -3,15 +3,17 @@ package main
 
 import (
 	"encoding/csv" // writing plague.csv
-	"flag"         // reading -batch from the command line
+	"flag"         // reading -batch, -seed and -cores from the command line
 	"fmt"          // building text for the screen and the terminal
 	"image/color"  // dot colours
 	"log"          // stopping with an error message
 	"math"         // rounding, distances, min and max
 	"math/rand/v2" // all the chance parts of the model
 	"os"           // creating the CSV file
+	"runtime"      // how many cores this machine has
 	"slices"       // copying the rat areas each day
 	"strconv"      // numbers to text for the CSV
+	"sync"         // the lock on hospital beds
 	"time"         // timing batch runs
 )
 
@@ -107,11 +109,11 @@ type Agent struct {
 }
 
 // Become moves a person to a new state and sets how long they stay in it.
-func (a *Agent) Become(s State) {
+func (a *Agent) Become(s State, rng *rand.Rand) {
 	a.State = s
 	a.Timer = 0                      // no time limit unless the state has one
 	if d := stateDays[s]; d[1] > 0 { // this state has a time limit
-		a.Timer = d[0] + rand.IntN(d[1]-d[0]+1) // a random number of days between the shortest and longest
+		a.Timer = d[0] + rng.IntN(d[1]-d[0]+1) // a random number of days between the shortest and longest
 	}
 }
 
@@ -122,7 +124,7 @@ func (a *Agent) quarantined(day int) bool { return day < a.QuarantineEnd }      
 // Move puts a person somewhere near their base for the day, usually close and at most DailyKm
 // away. A spot that isn't land in the mask, or is across a sealed county border, is rejected,
 // which keeps everyone on the island and inside sealed counties.
-func (a *Agent) Move(w *World) {
+func (a *Agent) Move(w *World, rng *rand.Rand) {
 	m, era := w.Map, w.Era
 	if a.State == Dead || a.isolated() || a.quarantined(w.Day) { // the dead, the isolated and the quarantined stay put
 		return
@@ -132,9 +134,9 @@ func (a *Agent) Move(w *World) {
 	if a.sick() {
 		spread *= sickSpeed // ill people stay closer still
 	}
-	x := a.BaseX + math.Max(-r, math.Min(rand.NormFloat64()*spread, r)) // random east–west step, capped at r
-	y := a.BaseY + math.Max(-r, math.Min(rand.NormFloat64()*spread, r)) // random north–south step, capped at r
-	if m.IsLand(x, y) && !w.blocked(a.BaseX, a.BaseY, x, y) {           // only onto land, and not across a sealed border; otherwise stay put
+	x := a.BaseX + math.Max(-r, math.Min(rng.NormFloat64()*spread, r)) // random east–west step, capped at r
+	y := a.BaseY + math.Max(-r, math.Min(rng.NormFloat64()*spread, r)) // random north–south step, capped at r
+	if m.IsLand(x, y) && !w.blocked(a.BaseX, a.BaseY, x, y) {          // only onto land, and not across a sealed border; otherwise stay put
 		a.X, a.Y = x, y
 	}
 }
@@ -189,12 +191,14 @@ type World struct {
 	StageHist  []Stage          // the response stage for every day, for the CSV
 	SealedHist []int            // counties sealed on every day, for the CSV
 	IsoHist    [][3]int         // dots in hospital, isolating at home and quarantined on every day
+	Seed       uint64           // the same seed always gives the same outbreak (see parallel.go)
+	bedLock    sync.Mutex       // hospital beds are freed from several cores at once (see discharge)
 	sick       sickGrid         // reused each day to find sick people quickly
 }
 
 // newWorld sets up a new outbreak: people at home, rats where people live, and the first case.
-func newWorld(m *Map, era *Era) *World {
-	w := &World{Map: m, Era: era, Agents: make([]Agent, numAgents), FirstCaseDay: -1, LastIslandCase: -1}
+func newWorld(m *Map, era *Era, seed uint64) *World {
+	w := &World{Map: m, Era: era, Agents: make([]Agent, numAgents), FirstCaseDay: -1, LastIslandCase: -1, Seed: seed}
 	w.LastCase = make([]int, len(m.Counties))            // one per county
 	w.Sealed = make([]bool, len(m.Counties))             // all open at the start
 	w.Manual = make([]bool, len(m.Counties))             // none clicked yet
@@ -202,30 +206,33 @@ func newWorld(m *Map, era *Era) *World {
 	for c := range w.LastCase {
 		w.LastCase[c] = -1 // no cases yet
 	}
-	for i := range w.Agents {
-		x, y := m.RandomHome()                                                  // a home picked by population
-		w.Agents[i] = Agent{X: x, Y: y, HomeX: x, HomeY: y, BaseX: x, BaseY: y} // healthy and at home
-	}
+	w.forBlocks(stepSetup, func(lo, hi int, rng *rand.Rand) {
+		for i := lo; i < hi; i++ {
+			x, y := m.RandomHome(rng)                                               // a home picked by population
+			w.Agents[i] = Agent{X: x, Y: y, HomeX: x, HomeY: y, BaseX: x, BaseY: y} // healthy and at home
+		}
+	})
 
+	rng := newStream(seed, 0, stepStart, 0) // its own random numbers for the start
 	start := m.Town(fixedStart)
 	w.StartX, w.StartY = start.X, start.Y // Dublin, unless randomStart is on
 	if randomStart {
-		w.StartX, w.StartY = m.RandomHome() // anywhere, more likely where more people live
+		w.StartX, w.StartY = m.RandomHome(rng) // anywhere, more likely where more people live
 	}
 	w.StartName = m.Describe(w.StartX, w.StartY) // e.g. "near Kilkenny"
 	for i := 0; i < initialSick; i++ {           // the first sick person (or people)
 		a := &w.Agents[i]
 		a.goTo(w.StartX, w.StartY, 0)    // move them to the start
 		for try := 0; try < 100; try++ { // then somewhere nearby, inside the infected rat areas
-			x := w.StartX + uniform(-1.5, 1.5)*ratCell // within 1.5 rat areas east or west
-			y := w.StartY + uniform(-1, 1)*ratCell     // within 1 rat area north or south
+			x := w.StartX + uniform(rng, -1.5, 1.5)*ratCell // within 1.5 rat areas east or west
+			y := w.StartY + uniform(rng, -1, 1)*ratCell     // within 1 rat area north or south
 			if m.IsLand(x, y) {
 				a.goTo(x, y, 0)
 				break
 			}
 		}
-		a.Become(Bubonic) // already ill
-		w.seekCare(a)     // and will see a doctor some day
+		a.Become(Bubonic, rng) // already ill
+		w.seekCare(a, rng)     // and will see a doctor some day
 	}
 
 	w.GridW = int(math.Ceil(float64(m.W) / ratCell)) // rat areas across the map
@@ -261,19 +268,22 @@ func (w *World) cellOf(x, y float64) (int, int) {
 }
 
 // Step advances one day. New infections are decided from the start-of-day state and applied
-// afterwards, so the order of the agents doesn't affect who gets infected.
+// afterwards, so the order of the agents doesn't affect who gets infected. The slowest steps
+// (travel, catching plague, illnesses moving on) are shared between the cores (see parallel.go).
 func (w *World) Step() {
 	w.travel() // everyone moves; trips start and end
 	if useRats {
 		w.updateRats() // plague spreads among rats; dying rats release fleas
 	}
-	caught := w.newExposures() // who catches plague today
-	for i := range w.Agents {
-		w.progress(&w.Agents[i]) // illnesses move on: fall ill, die or recover
-	}
-	for _, c := range caught {
-		w.Agents[c.agent].Become(c.state) // today's new infections take hold
-	}
+	caught := w.newExposures() // who catches plague today, one list per block
+	w.forBlocks(stepProgress, func(lo, hi int, rng *rand.Rand) {
+		for i := lo; i < hi; i++ {
+			w.progress(&w.Agents[i], rng) // illnesses move on: fall ill, die or recover
+		}
+		for _, c := range caught[lo/blockSize] { // they were healthy, so progress left them alone
+			w.Agents[c.agent].Become(c.state, rng) // today's new infections take hold
+		}
+	})
 	if w.Era.Modern {
 		w.diagnose() // doctors diagnose and treat; tracing and pest control start
 	}
@@ -285,7 +295,7 @@ func (w *World) Step() {
 
 // progress ends a state when its timer runs out. A sick person dies, recovers, or (untreated
 // bubonic only) turns pneumonic.
-func (w *World) progress(a *Agent) {
+func (w *World) progress(a *Agent, rng *rand.Rand) {
 	if stateDays[a.State][1] == 0 { // healthy, recovered or dead: nothing to count down
 		return
 	}
@@ -295,24 +305,24 @@ func (w *World) progress(a *Agent) {
 	}
 	switch a.State {
 	case ExposedBubonic: // incubation is over
-		a.Become(Bubonic)
-		w.seekCare(a)
+		a.Become(Bubonic, rng)
+		w.seekCare(a, rng)
 		return
 	case ExposedPneumonic:
-		a.Become(Pneumonic)
-		w.seekCare(a)
+		a.Become(Pneumonic, rng)
+		w.seekCare(a, rng)
 		return
 	}
-	defer w.discharge(a)   // whatever happens next, a hospital bed is freed
-	roll := rand.Float64() // one roll decides how the illness ends
+	defer w.discharge(a)  // whatever happens next, a hospital bed is freed
+	roll := rng.Float64() // one roll decides how the illness ends
 	switch {
 	case roll < deathChance(a):
-		a.Become(Dead)
+		a.Become(Dead, rng)
 	case a.State == Bubonic && !a.Treated && roll < bubonicDeathProb+bubonicPneumonicProb: // the next 10% of rolls
-		a.Become(Pneumonic) // the infection reaches the lungs
-		return              // still ill, and untreated, so never in hospital
+		a.Become(Pneumonic, rng) // the infection reaches the lungs
+		return                   // still ill, and untreated, so never in hospital
 	default:
-		a.Become(Recovered)
+		a.Become(Recovered, rng)
 	}
 	a.Treated = false // the illness is over
 }
@@ -324,25 +334,27 @@ func (w *World) progress(a *Agent) {
 func (w *World) travel() {
 	m, era := w.Map, w.Era
 	trip := era.TripProb * w.travelShare() // today's chance of starting a trip, after any travel cuts
-	for i := range w.Agents {
-		a := &w.Agents[i]
-		if a.AwayDays > 0 { // on a trip
-			a.AwayDays--
-			if a.AwayDays == 0 && !a.isolated() && a.State != Dead { // the trip is over
-				a.goTo(a.HomeX, a.HomeY, 0) // go home
+	w.forBlocks(stepTravel, func(lo, hi int, rng *rand.Rand) {
+		for i := lo; i < hi; i++ { // each dot only changes itself, so blocks can run at once
+			a := &w.Agents[i]
+			if a.AwayDays > 0 { // on a trip
+				a.AwayDays--
+				if a.AwayDays == 0 && !a.isolated() && a.State != Dead { // the trip is over
+					a.goTo(a.HomeX, a.HomeY, 0) // go home
+				}
 			}
-		}
-		a.Move(w) // today's local movement
+			a.Move(w, rng) // today's local movement
 
-		if a.sick() || a.State == Dead || a.Treated || a.AwayDays > 0 || a.quarantined(w.Day) { // can't start a trip
-			continue
-		}
-		if rand.Float64() < trip {
-			if x, y, ok := m.TripDestination(a.X, a.Y, era.TripKm); ok && !w.blocked(a.BaseX, a.BaseY, x, y) { // somewhere people live, within range, not across a sealed border
-				a.goTo(x, y, tripDaysMin+rand.IntN(tripDaysMax-tripDaysMin+1)) // for 1 to 7 days
+			if a.sick() || a.State == Dead || a.Treated || a.AwayDays > 0 || a.quarantined(w.Day) { // can't start a trip
+				continue
+			}
+			if rng.Float64() < trip {
+				if x, y, ok := m.TripDestination(rng, a.X, a.Y, era.TripKm); ok && !w.blocked(a.BaseX, a.BaseY, x, y) { // somewhere people live, within range, not across a sealed border
+					a.goTo(x, y, tripDaysMin+rng.IntN(tripDaysMax-tripDaysMin+1)) // for 1 to 7 days
+				}
 			}
 		}
-	}
+	})
 }
 
 // record saves today's counts and response stage for the CSV.
@@ -440,11 +452,13 @@ func (w *World) buildSickGrid() *sickGrid {
 			g.firstHealth[s] = int32(j)
 		}
 	}
-	for s := range g.first {
-		for j := g.first[s]; j >= 0; j = g.next[j] { // every infectious agent
-			g.crowd[j] = int32(w.countHealthy(&w.Agents[j], g)) // how many healthy people are near them
+	w.forBlocks(0, func(lo, hi int, _ *rand.Rand) { // the lists are built, so crowds can be counted on every core
+		for j := lo; j < hi; j++ {
+			if a := &w.Agents[j]; a.sick() && a.Hospital == 0 { // every infectious agent
+				g.crowd[j] = int32(w.countHealthy(a, g)) // how many healthy people are near them
+			}
 		}
-	}
+	})
 	return g
 }
 
@@ -482,23 +496,27 @@ func (w *World) contactChance(chance, perDay float64, crowd int32) float64 {
 	return chance
 }
 
-// newExposures finds everyone who catches plague today.
-func (w *World) newExposures() []exposure {
+// newExposures finds everyone who catches plague today, as one list per block of dots. Nothing
+// changes until every block has finished, so blocks can run on several cores at once.
+func (w *World) newExposures() [][]exposure {
 	g := w.buildSickGrid()
-	var caught []exposure
-	for i := range w.Agents {
-		if w.Agents[i].State != Susceptible { // only healthy people can catch it
-			continue
+	caught := make([][]exposure, (len(w.Agents)+blockSize-1)/blockSize)
+	w.forBlocks(stepExposure, func(lo, hi int, rng *rand.Rand) {
+		b := lo / blockSize // this block's list; no other core touches it
+		for i := lo; i < hi; i++ {
+			if w.Agents[i].State != Susceptible { // only healthy people can catch it
+				continue
+			}
+			if s, ok := w.catches(&w.Agents[i], g, rng); ok {
+				caught[b] = append(caught[b], exposure{agent: i, state: s})
+			}
 		}
-		if s, ok := w.catches(&w.Agents[i], g); ok {
-			caught = append(caught, exposure{agent: i, state: s})
-		}
-	}
+	})
 	return caught
 }
 
 // catches tries all three routes for one healthy agent and returns the form caught, if any.
-func (w *World) catches(a *Agent, g *sickGrid) (State, bool) {
+func (w *World) catches(a *Agent, g *sickGrid, rng *rand.Rand) (State, bool) {
 	era := w.Era
 	gx, gy := int(a.X/g.size), int(a.Y/g.size)                // their square
 	for sy := max(gy-1, 0); sy <= min(gy+1, g.rows-1); sy++ { // it and the squares around it
@@ -513,12 +531,12 @@ func (w *World) catches(a *Agent, g *sickGrid) (State, bool) {
 				d2 := dx*dx + dy*dy // squared distance between them
 				// route 1: breathing in pneumonic plague from someone close by
 				if usePneumonic && b.State == Pneumonic && d2 < pneumonicRadius*pneumonicRadius &&
-					rand.Float64() < leak*w.contactChance(era.PneumonicProb, era.PneumonicPerDay, g.crowd[j]) {
+					rng.Float64() < leak*w.contactChance(era.PneumonicProb, era.PneumonicPerDay, g.crowd[j]) {
 					return ExposedPneumonic, true
 				}
 				// route 2: human fleas or lice from someone with bubonic plague
 				if useEcto && b.State == Bubonic && d2 < ectoRadius*ectoRadius &&
-					rand.Float64() < leak*w.contactChance(era.EctoProb, era.EctoPerDay, g.crowd[j]) {
+					rng.Float64() < leak*w.contactChance(era.EctoProb, era.EctoPerDay, g.crowd[j]) {
 					return ExposedBubonic, true
 				}
 			}
@@ -531,7 +549,7 @@ func (w *World) catches(a *Agent, g *sickGrid) (State, bool) {
 		if cell.ControlDay >= 0 && w.Day >= int(cell.ControlDay) { // pest control is working here
 			bite *= bitesInTreated
 		}
-		if rand.Float64() < cell.Fleas*bite { // more loose fleas, more bites
+		if rng.Float64() < cell.Fleas*bite { // more loose fleas, more bites
 			return ExposedBubonic, true
 		}
 	}
@@ -581,9 +599,9 @@ func (w *World) Legend() []LegendItem {
 // Status returns the two lines of text under the map.
 func (w *World) Status() (string, string, string) {
 	dead := w.counts()[Dead]
-	// line 1: rules, day, deaths in real people and where it began
-	line1 := fmt.Sprintf("%s rules   Day %d   Dead: %s people (%.3f%%)   Began %s", w.Era.Year, w.Day,
-		thousands(float64(dead)*w.PeoplePerDot()), 100*float64(dead)/float64(len(w.Agents)), w.StartName)
+	// line 1: rules, day, deaths in real people, where it began, and the seed to replay it
+	line1 := fmt.Sprintf("%s rules   Day %d   Dead: %s people (%.3f%%)   Began %s   Seed %d", w.Era.Year, w.Day,
+		thousands(float64(dead)*w.PeoplePerDot()), 100*float64(dead)/float64(len(w.Agents)), w.StartName, w.Seed)
 	if !w.Era.Modern { // 1348 has no response to report
 		return line1, "No medicine, no public-health response. 1 dot ≈ " + thousands(w.PeoplePerDot()) + " people.", ""
 	}
@@ -613,8 +631,8 @@ func thousands(v float64) string {
 }
 
 // uniform returns a random number between lo and hi.
-func uniform(lo, hi float64) float64 {
-	return lo + (hi-lo)*rand.Float64()
+func uniform(rng *rand.Rand, lo, hi float64) float64 {
+	return lo + (hi-lo)*rng.Float64()
 }
 
 // ---------- Output ----------
@@ -629,7 +647,7 @@ func writeCSV(w *World, name string) error {
 
 	out := csv.NewWriter(file)
 	header := []string{"day", "susceptible", "exposed_bubonic", "exposed_pneumonic", "bubonic", "pneumonic", "recovered", "dead",
-		"response_stage", "counties_sealed", "in_hospital", "isolating_at_home", "quarantined", "new_deaths", "estimated_real_deaths", "era", "began"}
+		"response_stage", "counties_sealed", "in_hospital", "isolating_at_home", "quarantined", "new_deaths", "estimated_real_deaths", "era", "began", "seed"}
 	if err := out.Write(header); err != nil {
 		return err
 	}
@@ -645,7 +663,7 @@ func writeCSV(w *World, name string) error {
 		iso := w.IsoHist[day]
 		row = append(row, stageNames[w.StageHist[day]], strconv.Itoa(w.SealedHist[day]),
 			strconv.Itoa(iso[0]), strconv.Itoa(iso[1]), strconv.Itoa(iso[2]), strconv.Itoa(newDeaths),
-			strconv.Itoa(int(math.Round(float64(c[Dead])*w.PeoplePerDot()))), w.Era.Year, w.StartName)
+			strconv.Itoa(int(math.Round(float64(c[Dead])*w.PeoplePerDot()))), w.Era.Year, w.StartName, strconv.FormatUint(w.Seed, 10))
 		if err := out.Write(row); err != nil {
 			return err
 		}
@@ -655,13 +673,15 @@ func writeCSV(w *World, name string) error {
 }
 
 // runBatch runs outbreaks without a window and prints a line for each, then the average.
-func runBatch(m *Map, era *Era, runs int) {
-	fmt.Printf("%s rules, %s dots (1 dot ≈ %s people)\n\n", era.Year, thousands(numAgents), thousands(m.TotalPeople/numAgents))
-	fmt.Printf("%4s  %9s  %15s  %6s  %9s  %6s  %s\n", "run", "dead %", "≈ real deaths", "days", "national", "time", "began")
+// Run r uses seed seed+r-1, so a batch can be repeated exactly.
+func runBatch(m *Map, era *Era, runs int, seed uint64) {
+	fmt.Printf("%s rules, %s dots (1 dot ≈ %s people), seeds %d–%d, %d cores\n\n", era.Year, thousands(numAgents), thousands(m.TotalPeople/numAgents), seed, seed+uint64(runs)-1, cores)
+	fmt.Printf("%4s  %9s  %15s  %6s  %9s  %6s  %8s  %s\n", "run", "dead %", "≈ real deaths", "days", "national", "time", "seed", "began")
+	batchStart := time.Now()
 	var totalReal float64
 	for r := 1; r <= runs; r++ {
 		start := time.Now()
-		w := newWorld(m, era)
+		w := newWorld(m, era, seed+uint64(r-1))
 		for !w.Over() && w.Day < maxDays { // run until it dies out, or 10 years
 			w.Step()
 		}
@@ -671,18 +691,31 @@ func runBatch(m *Map, era *Era, runs int) {
 		if w.Stage == National {
 			national = "day " + strconv.Itoa(w.StageDay[National])
 		}
-		fmt.Printf("%4d  %8.3f%%  %15s  %6d  %9s  %5.1fs  %s\n", r, 100*float64(dead)/float64(len(w.Agents)),
-			thousands(real), w.Day, national, time.Since(start).Seconds(), w.StartName)
+		fmt.Printf("%4d  %8.3f%%  %15s  %6d  %9s  %5.1fs  %8d  %s\n", r, 100*float64(dead)/float64(len(w.Agents)),
+			thousands(real), w.Day, national, time.Since(start).Seconds(), w.Seed, w.StartName)
 		totalReal += real
 	}
-	fmt.Printf("\naverage: ≈ %s deaths\n\n", thousands(totalReal/float64(runs)))
+	fmt.Printf("\naverage: ≈ %s deaths   (%.1fs for all %d runs)\n\n", thousands(totalReal/float64(runs)), time.Since(batchStart).Seconds(), runs)
+}
+
+// randomSeed picks a seed when none is given. Seeds are kept short so they're easy to type.
+func randomSeed() uint64 {
+	return rand.Uint64N(1_000_000)
 }
 
 // ---------- Starting the program ----------
 
 func main() {
-	batch := flag.Int("batch", 0, "run this many outbreaks for each era without a window") // -batch N
+	batch := flag.Int("batch", 0, "run this many outbreaks for each era without a window")             // -batch N
+	seedFlag := flag.Int64("seed", -1, "the outbreak's seed (batch run r uses seed+r-1); -1 = random") // -seed N
+	coresFlag := flag.Int("cores", runtime.NumCPU(), "how many cores to use (1 = no parallelism)")     // -cores N
 	flag.Parse()
+
+	setCores(*coresFlag) // every core this machine has, unless -cores says otherwise
+	seed := randomSeed()
+	if *seedFlag >= 0 {
+		seed = uint64(*seedFlag) // replay a chosen outbreak
+	}
 
 	m, err := loadMap() // the map is built into the program
 	if err != nil {
@@ -690,12 +723,13 @@ func main() {
 	}
 	if batchMode && *batch > 0 { // batch mode: no window
 		for _, era := range eras {
-			runBatch(m, era, *batch)
+			runBatch(m, era, *batch, seed)
 		}
 		return
 	}
 
-	w := runLive(m) // open the window; returns when it is closed
+	fmt.Println("Seed", seed, "- run with -seed", seed, "to see this outbreak again")
+	w := runLive(m, seed) // open the window; returns when it is closed
 	if saveCSV {
 		if err := writeCSV(w, csvFile); err != nil {
 			log.Fatal(err)
