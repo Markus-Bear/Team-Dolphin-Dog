@@ -5,7 +5,6 @@ import (
 	"encoding/csv" // writing plague.csv
 	"flag"         // reading -batch, -seed and -cores from the command line
 	"fmt"          // building text for the screen and the terminal
-	"image/color"  // dot colours
 	"log"          // stopping with an error message
 	"math"         // rounding, distances, min and max
 	"math/rand/v2" // all the chance parts of the model
@@ -82,7 +81,6 @@ const (
 )
 
 var stateNames = [numStates]string{"Susceptible", "Exposed B", "Exposed P", "Bubonic", "Pneumonic", "Recovered", "Dead"} // legend text
-var stateColours = [numStates]color.RGBA{Green, Orange, Yellow, Red, Purple, Blue, Grey}                                 // dot colours
 
 // stateDays is the shortest and longest stay in each state; {0, 0} means it lasts until changed.
 var stateDays = [numStates][2]int{
@@ -181,11 +179,9 @@ type World struct {
 	Diagnosed    int            // people diagnosed so far
 	Prevented    int            // contacts saved by preventive antibiotics
 
-	LastCase       []int      // for each county, the day of its last diagnosis; -1 = none yet
-	LastIslandCase int        // the day of the last diagnosis anywhere; -1 = none yet
-	Sealed         []bool     // for each county, whether its border is closed today
-	Hospitals      []Hospital // each county's isolation hospital; Hospitals[0], the sea, has none
-	Manual         []bool     // for each county, whether it was sealed or opened by a click
+	Sealed    []bool     // for each county, whether its border is closed today
+	Hospitals []Hospital // each county's isolation hospital; Hospitals[0], the sea, has none
+	Manual    []bool     // for each county, whether it was sealed or opened by a click
 
 	History    [][numStates]int // counts of each state for every day, for the CSV
 	StageHist  []Stage          // the response stage for every day, for the CSV
@@ -198,22 +194,26 @@ type World struct {
 
 // newWorld sets up a new outbreak: people at home, rats where people live, and the first case.
 func newWorld(m *Map, era *Era, seed uint64) *World {
-	w := &World{Map: m, Era: era, Agents: make([]Agent, numAgents), FirstCaseDay: -1, LastIslandCase: -1, Seed: seed}
-	w.LastCase = make([]int, len(m.Counties))            // one per county
+	w := &World{Map: m, Era: era, Agents: make([]Agent, numAgents), FirstCaseDay: -1, Seed: seed}
 	w.Sealed = make([]bool, len(m.Counties))             // all open at the start
 	w.Manual = make([]bool, len(m.Counties))             // none clicked yet
 	w.Hospitals = m.hospitals(m.TotalPeople / numAgents) // every bed free
-	for c := range w.LastCase {
-		w.LastCase[c] = -1 // no cases yet
-	}
 	w.forBlocks(stepSetup, func(lo, hi int, rng *rand.Rand) {
 		for i := lo; i < hi; i++ {
 			x, y := m.RandomHome(rng)                                               // a home picked by population
 			w.Agents[i] = Agent{X: x, Y: y, HomeX: x, HomeY: y, BaseX: x, BaseY: y} // healthy and at home
 		}
 	})
+	w.startOutbreak()
+	w.setUpRats()
+	w.record() // day 0 counts
+	return w
+}
 
-	rng := newStream(seed, 0, stepStart, 0) // its own random numbers for the start
+// startOutbreak chooses where the outbreak begins and makes the first person ill there.
+func (w *World) startOutbreak() {
+	m := w.Map
+	rng := newStream(w.Seed, 0, stepStart, 0) // its own random numbers for the start
 	start := m.Town(fixedStart)
 	w.StartX, w.StartY = start.X, start.Y // Dublin, unless randomStart is on
 	if randomStart {
@@ -234,7 +234,11 @@ func newWorld(m *Map, era *Era, seed uint64) *World {
 		a.Become(Bubonic, rng) // already ill
 		w.seekCare(a, rng)     // and will see a doctor some day
 	}
+}
 
+// setUpRats puts rats where people live, with plague among them where the outbreak begins.
+func (w *World) setUpRats() {
+	m := w.Map
 	w.GridW = int(math.Ceil(float64(m.W) / ratCell)) // rat areas across the map
 	w.GridH = int(math.Ceil(float64(m.H) / ratCell)) // rat areas down the map
 	w.Cells = make([]Cell, w.GridW*w.GridH)
@@ -256,8 +260,6 @@ func newWorld(m *Map, era *Era, seed uint64) *World {
 			}
 		}
 	}
-	w.record() // day 0 counts
-	return w
 }
 
 // cellOf returns the rat area (column, row) containing a position.
@@ -359,7 +361,11 @@ func (w *World) travel() {
 
 // record saves today's counts and response stage for the CSV.
 func (w *World) record() {
-	w.History = append(w.History, w.counts())
+	var c [numStates]int
+	for i := range w.Agents {
+		c[w.Agents[i].State]++
+	}
+	w.History = append(w.History, c)
 	w.StageHist = append(w.StageHist, w.Stage)
 	w.SealedHist = append(w.SealedHist, w.sealedCount())
 	hospital, home, quarantined := w.isolationCounts()
@@ -462,16 +468,22 @@ func (w *World) buildSickGrid() *sickGrid {
 	return g
 }
 
+// around returns the columns and rows of the 3 × 3 squares around a position, kept on the map.
+func (g *sickGrid) around(x, y float64) (x0, x1, y0, y1 int) {
+	gx, gy := int(x/g.size), int(y/g.size) // the square it's in
+	return max(gx-1, 0), min(gx+1, g.cols-1), max(gy-1, 0), min(gy+1, g.rows-1)
+}
+
 // countHealthy counts the healthy agents within a sick agent's infection radius.
 func (w *World) countHealthy(b *Agent, g *sickGrid) int {
 	r := ectoRadius // bubonic spreads through fleas and lice
 	if b.State == Pneumonic {
 		r = pneumonicRadius // pneumonic spreads through the air
 	}
-	gx, gy := int(b.X/g.size), int(b.Y/g.size) // their square
 	n := 0
-	for sy := max(gy-1, 0); sy <= min(gy+1, g.rows-1); sy++ { // it and the squares around it
-		for sx := max(gx-1, 0); sx <= min(gx+1, g.cols-1); sx++ {
+	x0, x1, y0, y1 := g.around(b.X, b.Y)
+	for sy := y0; sy <= y1; sy++ { // their square and the squares around it
+		for sx := x0; sx <= x1; sx++ {
 			for i := g.firstHealth[sy*g.cols+sx]; i >= 0; i = g.nextHealth[i] { // every healthy agent there
 				dx, dy := w.Agents[i].X-b.X, w.Agents[i].Y-b.Y
 				if dx*dx+dy*dy < r*r { // close enough to catch it
@@ -500,7 +512,7 @@ func (w *World) contactChance(chance, perDay float64, crowd int32) float64 {
 // changes until every block has finished, so blocks can run on several cores at once.
 func (w *World) newExposures() [][]exposure {
 	g := w.buildSickGrid()
-	caught := make([][]exposure, (len(w.Agents)+blockSize-1)/blockSize)
+	caught := make([][]exposure, w.blocks())
 	w.forBlocks(stepExposure, func(lo, hi int, rng *rand.Rand) {
 		b := lo / blockSize // this block's list; no other core touches it
 		for i := lo; i < hi; i++ {
@@ -517,54 +529,61 @@ func (w *World) newExposures() [][]exposure {
 
 // catches tries all three routes for one healthy agent and returns the form caught, if any.
 func (w *World) catches(a *Agent, g *sickGrid, rng *rand.Rand) (State, bool) {
-	era := w.Era
-	gx, gy := int(a.X/g.size), int(a.Y/g.size)                // their square
-	for sy := max(gy-1, 0); sy <= min(gy+1, g.rows-1); sy++ { // it and the squares around it
-		for sx := max(gx-1, 0); sx <= min(gx+1, g.cols-1); sx++ {
+	x0, x1, y0, y1 := g.around(a.X, a.Y)
+	for sy := y0; sy <= y1; sy++ { // their square and the squares around it
+		for sx := x0; sx <= x1; sx++ {
 			for j := g.first[sy*g.cols+sx]; j >= 0; j = g.next[j] { // every infectious agent there
-				b := &w.Agents[j]
-				leak := 1.0
-				if b.isolated() { // isolating at home: still sharing a home
-					leak = homeLeak
-				}
-				dx, dy := a.X-b.X, a.Y-b.Y
-				d2 := dx*dx + dy*dy // squared distance between them
-				// route 1: breathing in pneumonic plague from someone close by
-				if usePneumonic && b.State == Pneumonic && d2 < pneumonicRadius*pneumonicRadius &&
-					rng.Float64() < leak*w.contactChance(era.PneumonicProb, era.PneumonicPerDay, g.crowd[j]) {
-					return ExposedPneumonic, true
-				}
-				// route 2: human fleas or lice from someone with bubonic plague
-				if useEcto && b.State == Bubonic && d2 < ectoRadius*ectoRadius &&
-					rng.Float64() < leak*w.contactChance(era.EctoProb, era.EctoPerDay, g.crowd[j]) {
-					return ExposedBubonic, true
+				if s, ok := w.catchesFrom(a, j, g, rng); ok {
+					return s, true
 				}
 			}
 		}
 	}
-	if useRats { // route 3: a bite from an infected rat flea
-		cx, cy := w.cellOf(a.X, a.Y)
-		cell := &w.Cells[cy*w.GridW+cx] // the rat area they're in
-		bite := era.FleaBiteProb
-		if cell.ControlDay >= 0 && w.Day >= int(cell.ControlDay) { // pest control is working here
-			bite *= bitesInTreated
-		}
-		if rng.Float64() < cell.Fleas*bite { // more loose fleas, more bites
-			return ExposedBubonic, true
-		}
+	if useRats && w.bitten(a, rng) { // route 3: a bite from an infected rat flea
+		return ExposedBubonic, true
 	}
 	return Susceptible, false // stayed healthy today
 }
 
-// ---------- Counts and status text ----------
-
-// counts returns how many dots are in each state.
-func (w *World) counts() [numStates]int {
-	var c [numStates]int
-	for _, a := range w.Agents {
-		c[a.State]++
+// catchesFrom tries the two person-to-person routes from infectious agent j to a healthy agent.
+func (w *World) catchesFrom(a *Agent, j int32, g *sickGrid, rng *rand.Rand) (State, bool) {
+	era, b := w.Era, &w.Agents[j]
+	leak := 1.0
+	if b.isolated() { // isolating at home: still sharing a home
+		leak = homeLeak
 	}
-	return c
+	dx, dy := a.X-b.X, a.Y-b.Y
+	d2 := dx*dx + dy*dy // squared distance between them
+	// route 1: breathing in pneumonic plague from someone close by
+	if usePneumonic && b.State == Pneumonic && d2 < pneumonicRadius*pneumonicRadius &&
+		rng.Float64() < leak*w.contactChance(era.PneumonicProb, era.PneumonicPerDay, g.crowd[j]) {
+		return ExposedPneumonic, true
+	}
+	// route 2: human fleas or lice from someone with bubonic plague
+	if useEcto && b.State == Bubonic && d2 < ectoRadius*ectoRadius &&
+		rng.Float64() < leak*w.contactChance(era.EctoProb, era.EctoPerDay, g.crowd[j]) {
+		return ExposedBubonic, true
+	}
+	return Susceptible, false
+}
+
+// bitten decides whether an infected rat flea bites this person today.
+func (w *World) bitten(a *Agent, rng *rand.Rand) bool {
+	cx, cy := w.cellOf(a.X, a.Y)
+	cell := &w.Cells[cy*w.GridW+cx] // the rat area they're in
+	bite := w.Era.FleaBiteProb
+	if cell.ControlDay >= 0 && w.Day >= int(cell.ControlDay) { // pest control is working here
+		bite *= bitesInTreated
+	}
+	return rng.Float64() < cell.Fleas*bite // more loose fleas, more bites
+}
+
+// ---------- Counts ----------
+
+// counts returns how many dots are in each state. Dots only change during a day, and every day
+// ends with record(), so today's counts are the last ones saved.
+func (w *World) counts() [numStates]int {
+	return w.History[len(w.History)-1]
 }
 
 // Over reports whether nobody is incubating or sick and no plague is left in the rats.
@@ -584,41 +603,6 @@ func (w *World) Over() bool {
 // PeoplePerDot is how many real people one dot stands for.
 func (w *World) PeoplePerDot() float64 {
 	return w.Map.TotalPeople / float64(len(w.Agents))
-}
-
-// Legend returns one entry per state for the top of the window, in real people, e.g. "Bubonic=4,200".
-func (w *World) Legend() []LegendItem {
-	c := w.counts()
-	items := make([]LegendItem, 0, numStates)
-	for s := range numStates {
-		items = append(items, LegendItem{Label: fmt.Sprintf("%s=%s", stateNames[s], thousands(float64(c[s])*w.PeoplePerDot())), Colour: stateColours[s]}) // dots × people per dot
-	}
-	return items
-}
-
-// Status returns the two lines of text under the map.
-func (w *World) Status() (string, string, string) {
-	dead := w.counts()[Dead]
-	// line 1: rules, day, deaths in real people, where it began, and the seed to replay it
-	line1 := fmt.Sprintf("%s rules   Day %d   Dead: %s people (%.3f%%)   Began %s   Seed %d", w.Era.Year, w.Day,
-		thousands(float64(dead)*w.PeoplePerDot()), 100*float64(dead)/float64(len(w.Agents)), w.StartName, w.Seed)
-	if !w.Era.Modern { // 1348 has no response to report
-		return line1, "No medicine, no public-health response. 1 dot ≈ " + thousands(w.PeoplePerDot()) + " people.", ""
-	}
-	line2 := "Response: " + stageNames[w.Stage] // line 2: the response so far
-	if w.Stage > Undetected {
-		line2 += fmt.Sprintf(" (day %d)", w.StageDay[w.Stage]) // when this stage began
-	}
-	if next := w.Stage + 1; w.Stage > Undetected && next < numStages {
-		line2 += fmt.Sprintf(", %s due day %d", stageNames[next], w.FirstCaseDay+stageStartsAfter[next]) // when the next one is due
-	}
-	line2 += fmt.Sprintf("   Diagnosed: %s   Saved by tracing: %s   Counties sealed: %d", // diagnosed and saved in real people
-		thousands(float64(w.Diagnosed)*w.PeoplePerDot()), thousands(float64(w.Prevented)*w.PeoplePerDot()), w.sealedCount())
-	iso := w.IsoHist[len(w.IsoHist)-1] // line 3: isolation and quarantine today, in real people
-	p := w.PeoplePerDot()
-	line3 := fmt.Sprintf("In hospital: %s of %s beds   Isolating at home: %s   Contacts in quarantine: %s",
-		thousands(float64(iso[0])*p), thousands(float64(w.totalBeds())*p), thousands(float64(iso[1])*p), thousands(float64(iso[2])*p))
-	return line1, line2, line3
 }
 
 // thousands formats 98700 as "98,700".

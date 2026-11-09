@@ -44,11 +44,16 @@ func setCores(n int) {
 	runtime.GOMAXPROCS(cores) // Go itself uses no more than that many cores either
 }
 
+// blocks is how many blocks the dots are split into.
+func (w *World) blocks() int {
+	return (len(w.Agents) + blockSize - 1) / blockSize
+}
+
 // forBlocks runs fn on every block of dots (lo … hi-1), with that block's generator for today
 // and this step, shared out between the cores: each core keeps taking the next block until none
 // are left (fork-join). With one core it's a plain loop, in order.
 func (w *World) forBlocks(step int, fn func(lo, hi int, rng *rand.Rand)) {
-	blocks := (len(w.Agents) + blockSize - 1) / blockSize
+	blocks := w.blocks()
 	work := func(b int) {
 		lo, hi := b*blockSize, min((b+1)*blockSize, len(w.Agents))
 		fn(lo, hi, newStream(w.Seed, w.Day, step, b))

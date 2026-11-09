@@ -19,7 +19,6 @@ const (
 var (
 	graphFrame = color.RGBA{0x99, 0x99, 0x99, 0xff} // the box round each graph
 	stageLine  = color.RGBA{0x00, 0x00, 0x00, 0x60} // see-through black: when each response stage began
-	sealedLine = SealedRed                          // counties sealed
 )
 
 // line is one line on a graph.
@@ -62,7 +61,7 @@ func (g *Game) graphs() []graph {
 		return float64(w.History[day][Dead]-w.History[from][Dead]) * w.PeoplePerDot() / float64(max(day-from, 1))
 	}}}}
 
-	sealed := graph{title: "Counties sealed", top: float64(len(w.Map.Counties) - 1), unit: " counties", lines: []line{{sealedLine, func(day int) float64 {
+	sealed := graph{title: "Counties sealed", top: float64(len(w.Map.Counties) - 1), unit: " counties", lines: []line{{SealedRed, func(day int) float64 {
 		return float64(w.SealedHist[day])
 	}}}}
 	return []graph{everyone, sick, deaths, sealed}
@@ -89,12 +88,12 @@ func (g *Game) drawGraphs(screen *ebiten.Image) {
 		}
 
 		g.drawText(screen, gr.title, float64(left), float64(top)-40, color.Black)
-		g.drawTextWith(screen, g.smallFont, thousands(maxValue)+gr.unit, float64(left), float64(top)-18, color.RGBA{0x55, 0x55, 0x55, 0xff}) // the top of the scale
-		g.drawTextWith(screen, g.smallFont, fmt.Sprintf("day %d", g.world.Day), float64(right)-40, float64(bottom)+2, color.RGBA{0x55, 0x55, 0x55, 0xff})
+		g.drawTextWith(screen, g.smallFont, thousands(maxValue)+gr.unit, float64(left), float64(top)-18, Grey) // the top of the scale
+		g.drawTextWith(screen, g.smallFont, fmt.Sprintf("day %d", g.world.Day), float64(right)-40, float64(bottom)+2, Grey)
 		vector.StrokeRect(screen, left, top, graphWidth, height, 1, graphFrame, false)
 
 		if gr.title == "Counties sealed" && !g.world.Era.Modern {
-			g.drawText(screen, "No lockdowns in 1348", float64(left)+90, float64(top+height/2)-10, color.RGBA{0x55, 0x55, 0x55, 0xff})
+			g.drawText(screen, "No lockdowns in 1348", float64(left)+90, float64(top+height/2)-10, Grey)
 			continue
 		}
 

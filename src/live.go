@@ -25,7 +25,7 @@ var (
 	Red       = color.RGBA{0xe0, 0x10, 0x30, 0xff} // ill with bubonic
 	Purple    = color.RGBA{0xa0, 0x50, 0xe0, 0xff} // ill with pneumonic
 	Blue      = color.RGBA{0x45, 0x95, 0xf4, 0xff} // recovered
-	Grey      = color.RGBA{0x55, 0x55, 0x55, 0xff} // dead (legend only; the dead aren't drawn)
+	Grey      = color.RGBA{0x55, 0x55, 0x55, 0xff} // the dead (in the legend and graphs; they aren't drawn), and small print
 	Brown     = color.RGBA{0x8c, 0x5a, 0x28, 0xff} // plague in the rats and fleas
 	OffMap    = color.RGBA{0x20, 0x20, 0x20, 0xff} // around the edges of the map
 	StartMark = color.RGBA{0xff, 0xd7, 0x00, 0xff} // the ring where the outbreak began
@@ -33,6 +33,9 @@ var (
 	DarkLine  = color.RGBA{0x30, 0x30, 0x30, 0xd0} // county borders on the paler maps: see-through grey
 	SealedRed = color.RGBA{0xd0, 0x10, 0x10, 0xff} // sealed counties' tint and name labels
 )
+
+// stateColours are the dot colours for each health state.
+var stateColours = [numStates]color.RGBA{Green, Orange, Yellow, Red, Purple, Blue, Grey}
 
 // areaStops colour the area view by the share of an area's people. Shares in between are
 // blended on a log scale, so 0.5% → 2% looks as big a step as 10% → 50%.
@@ -72,18 +75,19 @@ const (
 	plotTop       = 70  // the map area's top edge, below the legend
 	plotWidth     = 960 // the map area's size
 	plotHeight    = 740
+	plotMidX      = plotLeft + plotWidth/2 // the middle of the map area
+	plotMidY      = plotTop + plotHeight/2
 	markerRadius  = 4   // legend dots
 	legendColumns = 5   // legend entries per row
 	legendWidth   = 196 // width of each legend entry
 	maxZoom       = 16  // closest zoom: screen pixels per km
 	panSpeed      = 10  // screen pixels moved per frame with the arrow keys
+	startSpeed    = 3.5 // simulated days per second when the window opens
 
 	areaCell    = 10   // area-view squares, km
 	areaMinDots = 5    // squares with fewer dots are left blank; a share of 1–4 dots is noise
 	areaAlpha   = 0.75 // see-through, so the map shows underneath
 )
-
-var stepsPerSecond = 3.5 // simulated days per second; [ and ] halve or double it
 
 // ---------- Views ----------
 
@@ -114,29 +118,39 @@ type Game struct {
 	font      *text.GoTextFace // for all text
 	smallFont *text.GoTextFace // for county names
 	stepTimer float64          // fraction of a day waiting to be simulated
+	speed     float64          // simulated days per second; [ and ] halve or double it
 
 	centerX, centerY float64 // map position in the middle of the view
 	zoom             float64 // screen pixels per km
 
 	// Layers over the background. They are repainted only when something changes; Ebitengine
 	// scales and combines them every frame.
-	canvas   *ebiten.Image // the map area, put together each frame
-	dots     *ebiten.Image // one pixel per screen pixel
-	dotPix   []byte        // the dots' pixels before they are sent to dots
-	shade    *ebiten.Image // rat shading, one pixel per km
-	shadePix []byte
-	area     *ebiten.Image // area view, one pixel per area square
-	areaPix  []byte
-	tint     *ebiten.Image // red over sealed counties, one pixel per km
-	tintPix  []byte
-	borders  *ebiten.Image // county borders, one pixel per screen pixel
-	bordPix  []byte
-	drawn    string // what the layers show, to skip repainting when nothing changed
+	canvas  *ebiten.Image // the map area, put together each frame
+	dots    *layer        // one pixel per screen pixel
+	shade   *layer        // rat shading, one pixel per km
+	area    *layer        // area view, one pixel per area square
+	tint    *layer        // red over sealed counties, one pixel per km
+	borders *layer        // county borders, one pixel per screen pixel
+	drawn   string        // what the layers show, to skip repainting when nothing changed
 
 	mouseX, mouseY int  // pointer position last frame, for dragging
 	dragging       bool // the mouse button was already down last frame
 	pressX, pressY int  // where the mouse button went down, to tell a click from a drag
 }
+
+// layer is a picture over the background: pixels painted on the CPU, then sent to the graphics card.
+type layer struct {
+	img  *ebiten.Image
+	pix  []byte // four bytes per pixel, premultiplied by alpha
+	w, h int    // size in pixels
+}
+
+func newLayer(w, h int) *layer {
+	return &layer{img: ebiten.NewImage(w, h), pix: make([]byte, w*h*4), w: w, h: h}
+}
+
+// send copies the painted pixels to the graphics card.
+func (l *layer) send() { l.img.WritePixels(l.pix) }
 
 // fitZoom is the zoom that shows the whole island.
 func (g *Game) fitZoom() float64 {
@@ -170,7 +184,18 @@ func (g *Game) toScreen(x, y float64) (float32, float32) {
 
 // Update runs 60 times a second: input first, then as many simulated days as are due.
 func (g *Game) Update() error {
-	switch { // keys that act once per press
+	g.handleKeys()
+	g.handlePan()
+	g.handleMouse()
+	g.handleZoom()
+	g.clampView() // don't let the view leave the map
+	g.runDueDays()
+	return nil
+}
+
+// handleKeys deals with the keys that act once per press.
+func (g *Game) handleKeys() {
+	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeySpace):
 		g.paused = !g.paused // pause or carry on
 	case inpututil.IsKeyJustPressed(ebiten.KeyR):
@@ -186,24 +211,31 @@ func (g *Game) Update() error {
 	case inpututil.IsKeyJustPressed(ebiten.Key0), inpututil.IsKeyJustPressed(ebiten.KeyNumpad0):
 		g.resetView() // the whole island
 	case inpututil.IsKeyJustPressed(ebiten.KeyBracketRight):
-		stepsPerSecond = math.Min(stepsPerSecond*2, 112) // twice as fast, up to 112 days a second
+		g.speed = math.Min(g.speed*2, 112) // twice as fast, up to 112 days a second
 	case inpututil.IsKeyJustPressed(ebiten.KeyBracketLeft):
-		stepsPerSecond = math.Max(stepsPerSecond/2, 0.875) // half as fast
+		g.speed = math.Max(g.speed/2, 0.875) // half as fast
 	}
+}
 
+// panKeys are the arrow keys and the direction each moves the view.
+var panKeys = []struct {
+	key    ebiten.Key
+	dx, dy float64
+}{{ebiten.KeyArrowLeft, -1, 0}, {ebiten.KeyArrowRight, 1, 0}, {ebiten.KeyArrowUp, 0, -1}, {ebiten.KeyArrowDown, 0, 1}}
+
+// handlePan moves the view while an arrow key is held.
+func (g *Game) handlePan() {
 	step := panSpeed / g.zoom // the same screen distance at any zoom
-	if ebiten.IsKeyPressed(ebiten.KeyArrowLeft) {
-		g.centerX -= step
+	for _, p := range panKeys {
+		if ebiten.IsKeyPressed(p.key) {
+			g.centerX += p.dx * step
+			g.centerY += p.dy * step
+		}
 	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowRight) {
-		g.centerX += step
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
-		g.centerY -= step
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowDown) {
-		g.centerY += step
-	}
+}
+
+// handleMouse drags the map, and treats a press and release without moving as a click.
+func (g *Game) handleMouse() {
 	mx, my := ebiten.CursorPosition()
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		if g.dragging { // the map follows the pointer since last frame
@@ -220,32 +252,37 @@ func (g *Game) Update() error {
 		g.dragging = false
 	}
 	g.mouseX, g.mouseY = mx, my // remembered for next frame
+}
 
-	// +/− zoom on the middle of the map; the wheel zooms on the pointer
+// handleZoom zooms on the middle of the map with +/−, and on the pointer with the wheel.
+func (g *Game) handleZoom() {
 	if ebiten.IsKeyPressed(ebiten.KeyEqual) || ebiten.IsKeyPressed(ebiten.KeyNumpadAdd) {
-		g.zoomBy(1.04, plotLeft+plotWidth/2, plotTop+plotHeight/2) // 4% closer each frame the key is held
+		g.zoomBy(1.04, plotMidX, plotMidY) // 4% closer each frame the key is held
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyMinus) || ebiten.IsKeyPressed(ebiten.KeyNumpadSubtract) {
-		g.zoomBy(1/1.04, plotLeft+plotWidth/2, plotTop+plotHeight/2)
+		g.zoomBy(1/1.04, plotMidX, plotMidY)
 	}
 	if _, wheel := ebiten.Wheel(); wheel != 0 {
+		mx, my := ebiten.CursorPosition()
 		g.zoomBy(math.Pow(1.15, wheel), float64(mx), float64(my)) // 15% per wheel step
 	}
-	g.clampView() // don't let the view leave the map
+}
 
-	if !g.paused && !g.world.Over() { // the days stop once nobody is infected and the rats are clear
-		g.stepTimer += stepsPerSecond / 60                               // this frame's share of a day
-		for n := 0; g.stepTimer >= 1 && n < 20 && !g.world.Over(); n++ { // run each whole day that is due, at most 20 a frame
-			g.world.Step()
-			g.stepTimer--
-		}
+// runDueDays simulates each whole day that is due, unless paused or the outbreak is over.
+func (g *Game) runDueDays() {
+	if g.paused || g.world.Over() {
+		return
 	}
-	return nil
+	g.stepTimer += g.speed / 60                                      // this frame's share of a day
+	for n := 0; g.stepTimer >= 1 && n < 20 && !g.world.Over(); n++ { // at most 20 days a frame
+		g.world.Step()
+		g.stepTimer--
+	}
 }
 
 // click seals or opens the county under screen position (sx, sy).
 func (g *Game) click(sx, sy int) {
-	if sx < plotLeft || sy < plotTop || sx >= plotLeft+plotWidth || sy >= plotTop+plotHeight { // not on the map
+	if !onPlot(float64(sx), float64(sy), 1, 1) { // not on the map
 		return
 	}
 	left, top := g.origin()
@@ -254,6 +291,11 @@ func (g *Game) click(sx, sy int) {
 		g.world.toggleSeal(c)
 		g.drawn = "" // repaint the red tint
 	}
+}
+
+// onPlot reports whether a box on the screen is fully inside the map area.
+func onPlot(x, y, w, h float64) bool {
+	return x >= plotLeft && y >= plotTop && x+w <= plotLeft+plotWidth && y+h <= plotTop+plotHeight
 }
 
 // abs is the size of n, without its sign.
@@ -265,7 +307,7 @@ func abs(n int) int {
 func (g *Game) zoomBy(factor, sx, sy float64) {
 	before := g.zoom
 	g.zoom = math.Max(g.fitZoom(), math.Min(g.zoom*factor, maxZoom)) // no further out than the whole island, no closer than maxZoom
-	ox, oy := sx-(plotLeft+plotWidth/2), sy-(plotTop+plotHeight/2)   // the point's distance from the middle of the view
+	ox, oy := sx-plotMidX, sy-plotMidY                               // the point's distance from the middle of the view
 	g.centerX += ox/before - ox/g.zoom                               // shift so that point stays under the pointer
 	g.centerY += oy/before - oy/g.zoom
 }
@@ -297,10 +339,6 @@ func setPixel(pix []byte, i int, c color.RGBA, alpha float64) {
 // there is more of it.
 func (g *Game) paintShade() {
 	w, m := g.world, g.m
-	if g.shade == nil { // first time: make the layer
-		g.shade = ebiten.NewImage(m.W, m.H)
-		g.shadePix = make([]byte, m.W*m.H*4)
-	}
 	for i, land := range m.land { // every km of the map
 		shade := 0.0 // sea stays clear
 		if land {
@@ -308,19 +346,15 @@ func (g *Game) paintShade() {
 			c := w.Cells[cy*w.GridW+cx]
 			shade = min(1, (c.Infected+c.Fleas)*3) * 0.55 // stronger with more plague, at most 55%
 		}
-		setPixel(g.shadePix, i, Brown, shade)
+		setPixel(g.shade.pix, i, Brown, shade)
 	}
-	g.shade.WritePixels(g.shadePix) // send to the graphics card
+	g.shade.send()
 }
 
 // paintDots draws one dot per living agent. Dots grow as you zoom in; the dead aren't drawn.
 func (g *Game) paintDots() {
-	if g.dots == nil { // first time: make the layer
-		g.dots = ebiten.NewImage(plotWidth, plotHeight)
-		g.dotPix = make([]byte, plotWidth*plotHeight*4)
-	}
-	clear(g.dotPix) // start see-through
-	r := 0          // dot radius: 0 is a single pixel
+	clear(g.dots.pix) // start see-through
+	r := 0            // dot radius: 0 is a single pixel
 	switch {
 	case g.zoom >= 10:
 		r = 2
@@ -336,23 +370,18 @@ func (g *Game) paintDots() {
 			for dx := -r; dx <= r; dx++ {
 				x, y := int(sx)+dx, int(sy)+dy
 				if dx*dx+dy*dy <= r*r+r && x >= 0 && y >= 0 && x < plotWidth && y < plotHeight { // inside the circle and on screen
-					setPixel(g.dotPix, y*plotWidth+x, stateColours[a.State], 1)
+					setPixel(g.dots.pix, y*plotWidth+x, stateColours[a.State], 1)
 				}
 			}
 		}
 	}
-	g.dots.WritePixels(g.dotPix) // send to the graphics card
+	g.dots.send()
 }
 
 // paintArea colours each 10 km square by the share of its dots that are infected now (caught
 // it or ill) or dead. Dots are counted where they are; the dead stay where they died.
 func (g *Game) paintArea() {
-	cols := (g.m.W + areaCell - 1) / areaCell // squares across, rounding up
-	rows := (g.m.H + areaCell - 1) / areaCell // squares down
-	if g.area == nil {                        // first time: make the layer
-		g.area = ebiten.NewImage(cols, rows)
-		g.areaPix = make([]byte, cols*rows*4)
-	}
+	cols, rows := g.area.w, g.area.h
 	total := make([]int, cols*rows) // dots in each square
 	hit := make([]int, cols*rows)   // of those, infected now or dead
 	for _, a := range g.world.Agents {
@@ -363,13 +392,13 @@ func (g *Game) paintArea() {
 			hit[i]++
 		}
 	}
-	clear(g.areaPix) // start see-through
+	clear(g.area.pix) // start see-through
 	for i := range total {
 		if total[i] >= areaMinDots && hit[i] > 0 { // enough dots to trust, and something to show
-			setPixel(g.areaPix, i, areaColour(float64(hit[i])/float64(total[i])), areaAlpha)
+			setPixel(g.area.pix, i, areaColour(float64(hit[i])/float64(total[i])), areaAlpha)
 		}
 	}
-	g.area.WritePixels(g.areaPix) // send to the graphics card
+	g.area.send()
 }
 
 // areaColour picks the colour for a share between the areaStops.
@@ -390,28 +419,19 @@ func areaColour(share float64) color.RGBA {
 
 // paintTint colours sealed counties a faint red.
 func (g *Game) paintTint() {
-	m := g.m
-	if g.tint == nil { // first time: make the layer
-		g.tint = ebiten.NewImage(m.W, m.H)
-		g.tintPix = make([]byte, m.W*m.H*4)
-	}
-	for i, c := range m.county { // every km of the map
+	for i, c := range g.m.county { // every km of the map
 		alpha := 0.0
 		if g.world.Sealed[c] && c != 0 { // land in a sealed county
 			alpha = 0.22
 		}
-		setPixel(g.tintPix, i, SealedRed, alpha)
+		setPixel(g.tint.pix, i, SealedRed, alpha)
 	}
-	g.tint.WritePixels(g.tintPix)
+	g.tint.send()
 }
 
 // paintBorders draws a one-pixel line wherever neighbouring screen pixels are in different
 // counties, so the lines stay thin at any zoom.
 func (g *Game) paintBorders() {
-	if g.borders == nil { // first time: make the layer
-		g.borders = ebiten.NewImage(plotWidth, plotHeight)
-		g.bordPix = make([]byte, plotWidth*plotHeight*4)
-	}
 	line := Border
 	if g.m.Backgrounds[g.bg].Name != "satellite" {
 		line = DarkLine // white wouldn't show on the paler maps
@@ -423,7 +443,7 @@ func (g *Game) paintBorders() {
 			ids[sy*plotWidth+sx] = g.m.fineCountyAt(left+(float64(sx)+0.5)/g.zoom, top+(float64(sy)+0.5)/g.zoom)
 		}
 	}
-	clear(g.bordPix) // start see-through
+	clear(g.borders.pix) // start see-through
 	for i, c := range ids {
 		if c == 0 { // sea: the coast is already on the background
 			continue
@@ -436,10 +456,10 @@ func (g *Game) paintBorders() {
 			below = ids[i+plotWidth]
 		}
 		if (right != 0 && right != c) || (below != 0 && below != c) { // a different county next door
-			setPixel(g.bordPix, i, color.RGBA{line.R, line.G, line.B, 0xff}, float64(line.A)/255)
+			setPixel(g.borders.pix, i, color.RGBA{line.R, line.G, line.B, 0xff}, float64(line.A)/255)
 		}
 	}
-	g.borders.WritePixels(g.bordPix)
+	g.borders.send()
 }
 
 // drawCountyNames writes each county's name at its label point; sealed counties' names sit on a
@@ -451,8 +471,8 @@ func (g *Game) drawCountyNames(screen *ebiten.Image) {
 		}
 		x, y := g.toScreen(county.LabelX, county.LabelY)
 		w, h := text.Measure(county.Name, g.smallFont, 0)
-		sx, sy := float64(x)+plotLeft-w/2, float64(y)+plotTop-h/2                                    // centred on the label point
-		if sx < plotLeft || sy < plotTop || sx+w > plotLeft+plotWidth || sy+h > plotTop+plotHeight { // off the map area
+		sx, sy := float64(x)+plotLeft-w/2, float64(y)+plotTop-h/2 // centred on the label point
+		if !onPlot(sx, sy, w, h) {                                // off the map area
 			continue
 		}
 		if g.world.Sealed[c] {
@@ -466,61 +486,65 @@ func (g *Game) drawCountyNames(screen *ebiten.Image) {
 
 // ---------- Drawing ----------
 
+// drawOnMap draws a picture onto the canvas, following the zoom and pan. One of its pixels covers cell km.
+func (g *Game) drawOnMap(img *ebiten.Image, cell float64, filter ebiten.Filter) {
+	left, top := g.origin()
+	op := &ebiten.DrawImageOptions{Filter: filter}
+	op.GeoM.Scale(cell, cell)
+	op.GeoM.Translate(-left, -top) // move the view's corner to the top-left
+	op.GeoM.Scale(g.zoom, g.zoom)  // then enlarge
+	g.canvas.DrawImage(img, op)
+}
+
 // drawMap puts the background, the layers and the start ring on the canvas.
 func (g *Game) drawMap() {
-	left, top := g.origin()
 	g.canvas.Fill(OffMap) // anything outside the map
 
-	// The background is smoothed in the whole-island view; zoomed in, its 1 km pixels stay crisp.
 	if g.bgImages[g.bg] == nil {
 		g.bgImages[g.bg] = ebiten.NewImageFromImage(g.m.Backgrounds[g.bg].Image) // copy to the graphics card once
 	}
-	op := &ebiten.DrawImageOptions{}
-	op.GeoM.Translate(-left, -top) // move the view's corner to the top-left
-	op.GeoM.Scale(g.zoom, g.zoom)  // then enlarge
+	filter := ebiten.FilterNearest // zoomed in, the background's 1 km pixels stay crisp
 	if g.zoom < 3 {
-		op.Filter = ebiten.FilterLinear // smooth
+		filter = ebiten.FilterLinear // smoothed in the whole-island view
 	}
-	g.canvas.DrawImage(g.bgImages[g.bg], op)
-
-	layer, cell := g.shade, 1.0 // dots view: rat shading, one pixel per km
-	if g.view != dotsView {
-		layer, cell = g.area, areaCell // area views: one pixel per 10 km square
-	}
-	op = &ebiten.DrawImageOptions{}
-	op.GeoM.Scale(cell, cell) // one layer pixel per km or per area square
-	op.GeoM.Translate(-left, -top)
-	op.GeoM.Scale(g.zoom, g.zoom)
-	g.canvas.DrawImage(layer, op)
-
-	op = &ebiten.DrawImageOptions{}
-	op.GeoM.Translate(-left, -top) // sealed-county tint, one pixel per km
-	op.GeoM.Scale(g.zoom, g.zoom)
-	g.canvas.DrawImage(g.tint, op)
-	g.canvas.DrawImage(g.borders, nil) // county borders, already at screen size
+	g.drawOnMap(g.bgImages[g.bg], 1, filter)
 
 	if g.view == dotsView {
-		g.canvas.DrawImage(g.dots, nil) // already at screen size
+		g.drawOnMap(g.shade.img, 1, ebiten.FilterNearest)
+	} else {
+		g.drawOnMap(g.area.img, areaCell, ebiten.FilterNearest)
+	}
+	g.drawOnMap(g.tint.img, 1, ebiten.FilterNearest)
+	g.canvas.DrawImage(g.borders.img, nil) // county borders, already at screen size
+
+	if g.view == dotsView {
+		g.canvas.DrawImage(g.dots.img, nil) // already at screen size
 	}
 	x, y := g.toScreen(g.world.StartX, g.world.StartY)
 	vector.StrokeCircle(g.canvas, x, y, 10, 2, StartMark, true) // a 10-pixel ring where it began
 }
 
+// repaintLayers repaints the layers if anything they depend on has changed.
+func (g *Game) repaintLayers() {
+	state := fmt.Sprintf("%d %p %.4f %.2f %.2f %d %d", g.world.Day, g.world, g.zoom, g.centerX, g.centerY, g.view, g.bg) // everything the layers depend on
+	if state == g.drawn {
+		return
+	}
+	if g.view == dotsView {
+		g.paintShade()
+		g.paintDots()
+	} else {
+		g.paintArea()
+	}
+	g.paintTint()
+	g.paintBorders()
+	g.drawn = state
+}
+
 // Draw runs every frame and draws the whole window.
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.White)
-	state := fmt.Sprintf("%d %p %.4f %.2f %.2f %d %d", g.world.Day, g.world, g.zoom, g.centerX, g.centerY, g.view, g.bg) // everything the layers depend on
-	if state != g.drawn {                                                                                                // something changed, so repaint
-		if g.view == dotsView {
-			g.paintShade()
-			g.paintDots()
-		} else {
-			g.paintArea()
-		}
-		g.paintTint()
-		g.paintBorders()
-		g.drawn = state
-	}
+	g.repaintLayers()
 	g.drawMap()
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Translate(plotLeft, plotTop) // put the map area in place
@@ -530,8 +554,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawHospitals(screen)
 	g.scaleBar(screen)
 	g.drawGraphs(screen) // the graphs beside the map
+	g.drawColourKeys(screen)
+	g.drawLegend(screen)
+	g.drawStatus(screen)
+}
 
-	if g.view != dotsView { // key for the area colours, bottom right
+// drawColourKeys draws the key for the area colours and for the population map, when they're showing.
+func (g *Game) drawColourKeys(screen *ebiten.Image) {
+	if g.view != dotsView { // bottom right
 		var items []LegendItem
 		for i, s := range areaStops {
 			label := fmt.Sprintf("%g%%", s.share*100) // e.g. "2%"
@@ -542,18 +572,24 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 		g.key(screen, plotLeft+plotWidth-170, viewNames[g.view], "in 10 km squares", items)
 	}
-	if g.m.Backgrounds[g.bg].Name == "population" { // key for the population map, bottom left
+	if g.m.Backgrounds[g.bg].Name == "population" { // bottom left
 		g.key(screen, plotLeft+16, "People per km²", "2025", populationKey)
 	}
+}
 
-	for i, item := range g.world.Legend() { // the counts along the top, five to a row
+// drawLegend draws the counts along the top, five to a row.
+func (g *Game) drawLegend(screen *ebiten.Image) {
+	for i, item := range g.world.Legend() {
 		x := 20 + float64(i%legendColumns)*legendWidth
 		y := 10 + float64(i/legendColumns)*26
 		vector.FillCircle(screen, float32(x+markerRadius), float32(y+10), markerRadius, item.Colour, true)
 		g.drawText(screen, item.Label, x+2*markerRadius+6, y, color.Black)
 	}
+}
 
-	line1, line2, line3 := g.world.Status() // the status lines under the map
+// drawStatus draws the status lines and the keys line under the map.
+func (g *Game) drawStatus(screen *ebiten.Image) {
+	line1, line2, line3 := g.world.Status()
 	if g.world.Over() {
 		line1 += "   OUTBREAK OVER (R: new outbreak)"
 	} else if g.paused {
@@ -563,8 +599,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawText(screen, line2, 20, plotTop+plotHeight+30, color.Black)
 	g.drawText(screen, line3, 20, plotTop+plotHeight+52, color.Black)
 	keys := fmt.Sprintf("Arrows/drag: move  +/−/wheel: zoom  0: whole island  Y: %s rules  B: %s  V: %s  [ ]: %g days/s  Click: seal county  Space: pause  R: restart",
-		g.world.Era.Year, g.m.Backgrounds[g.bg].Name, viewNames[g.view], stepsPerSecond)
-	g.drawText(screen, keys, 20, plotTop+plotHeight+74, color.RGBA{0x55, 0x55, 0x55, 0xff}) // the keys, in grey
+		g.world.Era.Year, g.m.Backgrounds[g.bg].Name, viewNames[g.view], g.speed)
+	g.drawText(screen, keys, 20, plotTop+plotHeight+74, Grey) // the keys, in grey
 }
 
 // drawHospitals draws each county's isolation hospital in 2026, as in Team-Dolphin-Dog: a white
@@ -576,8 +612,8 @@ func (g *Game) drawHospitals(screen *ebiten.Image) {
 	for c := 1; c < len(g.world.Hospitals); c++ {
 		h := g.world.Hospitals[c]
 		x, y := g.toScreen(h.X, h.Y)
-		x, y = x+plotLeft-6, y+plotTop-6                                                           // top-left of a 12-pixel square
-		if x < plotLeft || y < plotTop || x+12 > plotLeft+plotWidth || y+12 > plotTop+plotHeight { // off the map area
+		x, y = x+plotLeft-6, y+plotTop-6             // top-left of a 12-pixel square
+		if !onPlot(float64(x), float64(y), 12, 12) { // off the map area
 			continue
 		}
 		fill := color.Color(color.White)
@@ -624,7 +660,42 @@ func (g *Game) key(screen *ebiten.Image, x float32, title, foot string, items []
 		vector.FillRect(screen, x, ry+2, 28, rowH-4, item.Colour, false)
 		g.drawText(screen, item.Label, float64(x+38), float64(ry), color.Black)
 	}
-	g.drawText(screen, foot, float64(x), float64(y+rowH*(n+1)), color.RGBA{0x55, 0x55, 0x55, 0xff}) // the note underneath, in grey
+	g.drawText(screen, foot, float64(x), float64(y+rowH*(n+1)), Grey) // the note underneath, in grey
+}
+
+// Legend returns one entry per state for the top of the window, in real people, e.g. "Bubonic=4,200".
+func (w *World) Legend() []LegendItem {
+	c := w.counts()
+	items := make([]LegendItem, 0, numStates)
+	for s := range numStates {
+		items = append(items, LegendItem{Label: fmt.Sprintf("%s=%s", stateNames[s], thousands(float64(c[s])*w.PeoplePerDot())), Colour: stateColours[s]}) // dots × people per dot
+	}
+	return items
+}
+
+// Status returns the three lines of text under the map.
+func (w *World) Status() (string, string, string) {
+	dead := w.counts()[Dead]
+	// line 1: rules, day, deaths in real people, where it began, and the seed to replay it
+	line1 := fmt.Sprintf("%s rules   Day %d   Dead: %s people (%.3f%%)   Began %s   Seed %d", w.Era.Year, w.Day,
+		thousands(float64(dead)*w.PeoplePerDot()), 100*float64(dead)/float64(len(w.Agents)), w.StartName, w.Seed)
+	if !w.Era.Modern { // 1348 has no response to report
+		return line1, "No medicine, no public-health response. 1 dot ≈ " + thousands(w.PeoplePerDot()) + " people.", ""
+	}
+	line2 := "Response: " + stageNames[w.Stage] // line 2: the response so far
+	if w.Stage > Undetected {
+		line2 += fmt.Sprintf(" (day %d)", w.StageDay[w.Stage]) // when this stage began
+	}
+	if next := w.Stage + 1; w.Stage > Undetected && next < numStages {
+		line2 += fmt.Sprintf(", %s due day %d", stageNames[next], w.FirstCaseDay+stageStartsAfter[next]) // when the next one is due
+	}
+	line2 += fmt.Sprintf("   Diagnosed: %s   Saved by tracing: %s   Counties sealed: %d", // diagnosed and saved in real people
+		thousands(float64(w.Diagnosed)*w.PeoplePerDot()), thousands(float64(w.Prevented)*w.PeoplePerDot()), w.sealedCount())
+	iso := w.IsoHist[len(w.IsoHist)-1] // line 3: isolation and quarantine today, in real people
+	p := w.PeoplePerDot()
+	line3 := fmt.Sprintf("In hospital: %s of %s beds   Isolating at home: %s   Contacts in quarantine: %s",
+		thousands(float64(iso[0])*p), thousands(float64(w.totalBeds())*p), thousands(float64(iso[1])*p), thousands(float64(iso[2])*p))
+	return line1, line2, line3
 }
 
 // drawText writes s with its top-left corner at (x, y).
@@ -665,7 +736,13 @@ func runLive(m *Map, seed uint64) *World {
 		font:      &text.GoTextFace{Source: src, Size: 15},
 		smallFont: &text.GoTextFace{Source: src, Size: 12},
 		bgImages:  make([]*ebiten.Image, len(m.Backgrounds)), // one empty slot per background
+		speed:     startSpeed,
 		canvas:    ebiten.NewImage(plotWidth, plotHeight),
+		dots:      newLayer(plotWidth, plotHeight),
+		shade:     newLayer(m.W, m.H),
+		area:      newLayer((m.W+areaCell-1)/areaCell, (m.H+areaCell-1)/areaCell), // squares across and down, rounding up
+		tint:      newLayer(m.W, m.H),
+		borders:   newLayer(plotWidth, plotHeight),
 	}
 	g.resetView()                             // start with the whole island
 	g.restart()                               // and a new outbreak

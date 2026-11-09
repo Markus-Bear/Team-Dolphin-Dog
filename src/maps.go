@@ -7,13 +7,12 @@ import (
 	"encoding/csv" // reading the town list
 	"fmt"          // error messages and place descriptions
 	"image"        // the map images
-	"image/jpeg"   // decoding the satellite picture
-	"image/png"    // decoding the other maps
+	_ "image/jpeg" // lets image.Decode read the satellite picture
+	_ "image/png"  // lets image.Decode read the other maps
 	"math"         // distances
 	"math/rand/v2" // picking random homes
 	"sort"         // finding a weighted random pick quickly
 	"strconv"      // town positions from text
-	"strings"      // telling .jpg from .png
 )
 
 //go:embed maps/*.png maps/*.csv maps/*.jpg
@@ -197,15 +196,11 @@ func loadMap() (*Map, error) {
 
 // loadTowns reads the town list.
 func (m *Map) loadTowns() error {
-	data, err := mapFiles.ReadFile("maps/ireland_towns.csv")
+	rows, err := readTable("maps/ireland_towns.csv")
 	if err != nil {
 		return err
 	}
-	rows, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
-	if err != nil {
-		return err
-	}
-	for _, row := range rows[1:] { // skip the header; columns: name, x, y
+	for _, row := range rows { // columns: name, x, y
 		t := Town{Name: row[0]}
 		t.X, _ = strconv.ParseFloat(row[1], 64)
 		t.Y, _ = strconv.ParseFloat(row[2], 64)
@@ -226,16 +221,12 @@ func (m *Map) loadCounties() error {
 	}
 	m.county = coarse.(*image.Gray).Pix
 	m.fineCounty = fine.(*image.Gray).Pix
-	data, err := mapFiles.ReadFile("maps/ireland_counties.csv")
+	rows, err := readTable("maps/ireland_counties.csv")
 	if err != nil {
 		return err
 	}
-	rows, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
-	if err != nil {
-		return err
-	}
-	m.Counties = make([]County, len(rows)) // the header row's slot becomes Counties[0], the sea
-	for _, row := range rows[1:] {         // columns: id, name, label_x, label_y
+	m.Counties = make([]County, len(rows)+1) // one extra for Counties[0], the sea
+	for _, row := range rows {               // columns: id, name, label_x, label_y
 		id, _ := strconv.Atoi(row[0])
 		c := &m.Counties[id]
 		c.Name = row[1]
@@ -251,25 +242,38 @@ func readImage(name string) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasSuffix(name, ".jpg") {
-		return jpeg.Decode(bytes.NewReader(data))
+	img, _, err := image.Decode(bytes.NewReader(data))
+	return img, err
+}
+
+// readTable reads one of the built-in CSV files, without its header row.
+func readTable(name string) ([][]string, error) {
+	data, err := mapFiles.ReadFile(name)
+	if err != nil {
+		return nil, err
 	}
-	return png.Decode(bytes.NewReader(data))
+	rows, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	return rows[1:], nil
 }
 
 // ---------- Places on the map ----------
 
 // IsLand reports whether a position is on the island.
 func (m *Map) IsLand(x, y float64) bool {
-	if x < 0 || y < 0 || x >= float64(m.W) || y >= float64(m.H) { // off the map
-		return false
-	}
-	return m.land[int(y)*m.W+int(x)]
+	return m.onMap(x, y) && m.land[int(y)*m.W+int(x)]
+}
+
+// onMap reports whether a position is inside the map.
+func (m *Map) onMap(x, y float64) bool {
+	return x >= 0 && y >= 0 && x < float64(m.W) && y < float64(m.H)
 }
 
 // CountyAt returns the county number at a position; 0 = sea or off the map.
 func (m *Map) CountyAt(x, y float64) int {
-	if x < 0 || y < 0 || x >= float64(m.W) || y >= float64(m.H) {
+	if !m.onMap(x, y) {
 		return 0
 	}
 	return int(m.county[int(y)*m.W+int(x)])
