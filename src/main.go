@@ -3,7 +3,7 @@ package main
 
 import (
 	"encoding/csv" // writing plague.csv
-	"flag"         // reading -batch, -seed and -cores from the command line
+	"flag"         // reading -batch, -seed, -cores and the rest from the command line
 	"fmt"          // building text for the screen and the terminal
 	"log"          // stopping with an error message
 	"math"         // rounding, distances, min and max
@@ -37,7 +37,8 @@ const (
 	randomStart          = true // false: always start in Dublin
 )
 
-const numAgents = 200000 // number of dots; each stands for ~35 people
+// numAgents is the number of dots. -agents sets it; at 200,000 each dot stands for ~35 people.
+var numAgents = 200000
 
 // ---------- Disease and rats ----------
 
@@ -195,9 +196,9 @@ type World struct {
 // newWorld sets up a new outbreak: people at home, rats where people live, and the first case.
 func newWorld(m *Map, era *Era, seed uint64) *World {
 	w := &World{Map: m, Era: era, Agents: make([]Agent, numAgents), FirstCaseDay: -1, Seed: seed}
-	w.Sealed = make([]bool, len(m.Counties))             // all open at the start
-	w.Manual = make([]bool, len(m.Counties))             // none clicked yet
-	w.Hospitals = m.hospitals(m.TotalPeople / numAgents) // every bed free
+	w.Sealed = make([]bool, len(m.Counties))                      // all open at the start
+	w.Manual = make([]bool, len(m.Counties))                      // none clicked yet
+	w.Hospitals = m.hospitals(m.TotalPeople / float64(numAgents)) // every bed free
 	w.forBlocks(stepSetup, func(lo, hi int, rng *rand.Rand) {
 		for i := lo; i < hi; i++ {
 			x, y := m.RandomHome(rng)                                               // a home picked by population
@@ -659,7 +660,7 @@ func writeCSV(w *World, name string) error {
 // runBatch runs outbreaks without a window and prints a line for each, then the average.
 // Run r uses seed seed+r-1, so a batch can be repeated exactly.
 func runBatch(m *Map, era *Era, runs int, seed uint64) {
-	fmt.Printf("%s rules, %s dots (1 dot ≈ %s people), seeds %d–%d, %d cores\n\n", era.Year, thousands(numAgents), thousands(m.TotalPeople/numAgents), seed, seed+uint64(runs)-1, cores)
+	fmt.Printf("%s rules, %s dots (1 dot ≈ %s people), seeds %d–%d, %d cores\n\n", era.Year, thousands(float64(numAgents)), thousands(m.TotalPeople/float64(numAgents)), seed, seed+uint64(runs)-1, cores)
 	fmt.Printf("%4s  %9s  %15s  %6s  %9s  %6s  %8s  %s\n", "run", "dead %", "≈ real deaths", "days", "national", "time", "seed", "began")
 	batchStart := time.Now()
 	var totalReal float64
@@ -690,12 +691,28 @@ func randomSeed() uint64 {
 // ---------- Starting the program ----------
 
 func main() {
-	batch := flag.Int("batch", 0, "run this many outbreaks for each era without a window")             // -batch N
-	seedFlag := flag.Int64("seed", -1, "the outbreak's seed (batch run r uses seed+r-1); -1 = random") // -seed N
-	coresFlag := flag.Int("cores", runtime.NumCPU(), "how many cores to use (1 = no parallelism)")     // -cores N
+	batch := flag.Int("batch", 0, "run this many outbreaks for each era without a window")                            // -batch N
+	seedFlag := flag.Int64("seed", -1, "the outbreak's seed (batch run r uses seed+r-1); -1 = random")                // -seed N
+	coresFlag := flag.String("cores", "", "how many cores to use (1 = no parallelism); a list with -bench")           // -cores N or -cores 1,2,4
+	agentsFlag := flag.String("agents", "", "how many dots (default 200000); a list with -bench")                     // -agents N or -agents 10000,200000
+	bench := flag.Bool("bench", false, "time the simulation at each -agents and -cores and add to bench/results.csv") // -bench
+	repeats := flag.Int("repeats", 3, "with -bench: timed runs for each number of dots and cores")                    // -repeats N
+	days := flag.Int("days", 20, "with -bench: how many days are timed")                                              // -days N
+	fromDay := flag.Int("from-day", 40, "with -bench: the day the timing starts")                                     // -from-day N
+	eraFlag := flag.String("era", "2026", "with -bench: 2026 or 1348 rules")                                          // -era 1348
+	machine := flag.String("machine", "", "with -bench: this machine's name (default: its hostname)")                 // -machine NAME
+	cpu := flag.String("cpu", "", "with -bench: this machine's CPU (default: detected)")                              // -cpu NAME
+	report := flag.String("report", "", "draw the graphs and summary.md from results.csv in this folder")             // -report bench
 	flag.Parse()
 
-	setCores(*coresFlag) // every core this machine has, unless -cores says otherwise
+	if *report != "" { // report mode: only reads the results file, no simulation
+		if err := writeReport(*report); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	agentList, coreList := numbers(*agentsFlag), numbers(*coresFlag)
 	seed := randomSeed()
 	if *seedFlag >= 0 {
 		seed = uint64(*seedFlag) // replay a chosen outbreak
@@ -704,6 +721,25 @@ func main() {
 	m, err := loadMap() // the map is built into the program
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *bench { // benchmark mode: no window
+		o := benchOptions{agents: agentList, cores: coreList, repeats: *repeats, days: *days, fromDay: *fromDay,
+			seed: benchSeed, era: eraNamed(*eraFlag), machine: *machine, cpu: *cpu, dir: benchDir}
+		if *seedFlag >= 0 {
+			o.seed = uint64(*seedFlag)
+		}
+		if err := runBench(m, o); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if len(agentList) > 0 {
+		numAgents = agentList[0] // -agents N
+	}
+	setCores(runtime.NumCPU()) // every core this machine has, unless -cores says otherwise
+	if len(coreList) > 0 {
+		setCores(coreList[0]) // -cores N
 	}
 	if batchMode && *batch > 0 { // batch mode: no window
 		for _, era := range eras {

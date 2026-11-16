@@ -172,6 +172,7 @@ Everything else runs in order on one core.
 |---|---|---|
 | `-cores N` | every core this machine has | how many cores to use; `-cores 1` is the one-core baseline |
 | `-seed N` | random (printed) | the outbreak's seed; batch run *r* uses seed + *r* − 1 |
+| `-agents N` | 200,000 | how many dots; anything from 10,000 (1 dot ≈ 708 people) to 7,000,000 (1 dot ≈ 1 person) |
 
 For example, `go run ./src -batch 10 -seed 1 -cores 1` and `go run ./src -batch 10 -seed 1` print **the same outbreaks**: once on one core, once on all of them.
 
@@ -200,6 +201,61 @@ go test ./src -run XXX -bench Day -benchtime 3x
 | Apple M5 (macOS) | 10 (4 performance + 6 efficiency) | 10.3 ms | 6.3 (1.6×) | 4.8 (2.2×) | 4.1 (2.5×) | 4.0 | **2.6×** |
 | *(add yours)* | | | | | | | |
 
+### Benchmark: dots × cores
+
+`BenchmarkDay` only times 200,000 dots and only prints. The benchmark command times every number of dots on every number of cores, and **saves every run** to one file that all of us add to:
+
+```bash
+go run ./src -bench            # about 5 minutes; adds rows to bench/results.csv
+go run ./src -report bench     # draws the graphs and bench/summary.md from that file
+```
+
+Then commit `bench/`. Keep the laptop plugged in and close other programs while it runs.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-agents 10000,200000` | 10,000, 50,000, 200,000 and 1,000,000 | the numbers of dots to time |
+| `-cores 1,2,4` | 1, 2, 4, 8 … up to every core, plus half of them | the numbers of cores to time; more than the machine has are skipped |
+| `-repeats N` | 3 | timed runs for each number of dots and cores |
+| `-days N` | 20 | days timed in each run |
+| `-from-day N` | 40 | the day the timing starts; the days before it aren't timed |
+| `-seed N` | 11 | repeat *r* uses seed + *r* − 1, the same for every number of cores |
+| `-era 1348` | 2026 | which rules |
+| `-machine NAME`, `-cpu NAME` | the hostname and the detected CPU | what to call this machine in the file |
+
+**One run** sets up an outbreak, runs it to day 40 without timing, then times the next 20 days. Before the first run there is one short warm-up that isn't timed.
+
+**Why day 40?** We tried starting at days 40, 80 and 120 with 200,000 and 1,000,000 dots. The outbreak is still going at all of them (seed 11 with 1,000,000 dots: about 350 dots have plague on day 40, 370 on day 80 and 270 on day 120), and the time per day hardly changes. In 2026 few dots are ill at once, so most of a day's work is moving every dot and sorting them into squares, and that doesn't depend on the day. So we kept day 40, the same as `BenchmarkDay`.
+
+**`bench/results.csv`** has one row per timed run. Rows are only ever added.
+
+| Column | Meaning |
+|---|---|
+| `date` | when the benchmark started |
+| `machine`, `cpu` | the hostname and the CPU's name |
+| `logical_cores` | cores as the system counts them (hyperthreads included) |
+| `commit` | the code that was timed (`git rev-parse --short HEAD`) |
+| `era` | 2026 or 1348 rules |
+| `agents`, `cores` | dots and cores in this run |
+| `repeat`, `seed` | which repeat, and its outbreak's seed |
+| `from_day`, `days` | the first timed day, and how many days were timed |
+| `ms_per_day` | the result: milliseconds for one simulated day |
+| `dead` | deaths (in dots) at the end of the run |
+
+**`dead` is also a check.** The same dots and seed must give the same deaths on every number of cores. The benchmark prints `same` or `DIFFERENT` for every run, and `summary.md` has a ✓ or ✗ for every number of dots.
+
+**The report** uses the **median** of the repeats, so one slow run doesn't spoil a result. It writes into `bench/`:
+
+| File | What it shows |
+|---|---|
+| `speedup.png` | speed-up (1-core time ÷ *N*-core time) against cores, one line per number of dots; the dashed line is the ideal, *N* cores = *N* times faster |
+| `time.png` | ms per day against cores, with a bar from the fastest repeat to the slowest |
+| `efficiency.png` | speed-up ÷ cores: how much of each core is really used |
+| `scaling.png` | ms per day against dots, one line per number of cores |
+| `summary.md` | a table for each machine and number of dots, the ✓/✗ check, and the four graphs |
+
+Each machine in the file gets its own graph in every picture, one under the other. The graphs are drawn in Go with `golang.org/x/image`, so there is nothing to install.
+
 **Notes:**
 - **A seed replays exactly on the same machine.** A Mac with an Apple chip and a Windows PC may give slightly different outbreaks for the same seed. Their processors round some arithmetic differently (Apple chips can do a multiply and an add in one step). So compare averages across machines, not single runs.
 - **`go test -race ./src -run SameResult`** also checks for data races. On Windows it needs a C compiler (for example from MSYS2).
@@ -217,6 +273,9 @@ go test ./src -run XXX -bench Day -benchtime 3x
 | `src/quarantine.go` | isolation hospitals, isolation at home and quarantine of close contacts |
 | `src/parallel.go` | seeded random numbers per block of dots, and sharing the slow steps between cores |
 | `src/bench_test.go` | the same-result test and the benchmark |
+| `src/bench.go` | `-bench`: timing every number of dots and cores, and adding the runs to `bench/results.csv` |
+| `src/report.go` | `-report`: the graphs and `summary.md` from `bench/results.csv` |
+| `bench/` | everyone's benchmark results, and the graphs made from them |
 | `src/maps/` | mask (where dots can go), population, satellite and beige maps, town list, county maps (a county number for every km, and every 250 m for drawing the borders) and county names |
 
 The maps are 380 × 480 pixels, 1 km per pixel, in an equal-area projection centred on Ireland (`+proj=laea +lat_0=53.5 +lon_0=-8`). Great Britain and the Isle of Man are painted as sea. People in coastal pixels whose centre is in the sea were moved onto the nearest land, so the island has 7.08 million people.
