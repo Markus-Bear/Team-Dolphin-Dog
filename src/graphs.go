@@ -30,8 +30,6 @@ var (
 	graphFrame = color.RGBA{0x99, 0x99, 0x99, 0xff} // the box round each graph
 	stageLine  = color.RGBA{0x00, 0x00, 0x00, 0x60} // see-through black: when each response stage began
 	gridLine   = color.RGBA{0x00, 0x00, 0x00, 0x18} // very faint black: the middle of the scale
-	scaleGrey  = color.RGBA{0x55, 0x55, 0x55, 0xff} // the numbers on the scales
-	sealedLine = SealedRed                          // counties sealed
 )
 
 // line is one line on a graph.
@@ -73,7 +71,7 @@ func (g *Game) graphs() []graph {
 		return float64(w.History[day][Dead]-w.History[from][Dead]) * w.PeoplePerDot() / float64(max(day-from, 1))
 	}}}}
 
-	sealed := graph{title: "Counties sealed", top: float64(len(w.Map.Counties) - 1), lines: []line{{sealedLine, func(day int) float64 {
+	sealed := graph{title: "Counties sealed", top: float64(len(w.Map.Counties) - 1), lines: []line{{SealedRed, func(day int) float64 {
 		return float64(w.SealedHist[day])
 	}}}}
 	return []graph{everyone, sick, deaths, sealed}
@@ -106,7 +104,7 @@ func (g *Game) drawGraphs(screen *ebiten.Image) {
 		for _, f := range []float32{1, 0.5, 0} {
 			label := short(maxValue * float64(f))
 			w, _ := text.Measure(label, g.smallFont, 0)
-			g.drawTextWith(screen, g.smallFont, label, float64(left)-6-w, float64(bottom-graphHeight*f)-7, scaleGrey)
+			g.drawTextWith(screen, g.smallFont, label, float64(left)-6-w, float64(bottom-graphHeight*f)-7, Grey)
 		}
 
 		// The days underneath: day 0, half way, and today.
@@ -117,11 +115,11 @@ func (g *Game) drawGraphs(screen *ebiten.Image) {
 			}
 			w, _ := text.Measure(label, g.smallFont, 0)
 			x := float64(left+graphWidth*f) - w*float64(f) // left-aligned at 0, centred half way, right-aligned at today
-			g.drawTextWith(screen, g.smallFont, label, x, float64(bottom)+2, scaleGrey)
+			g.drawTextWith(screen, g.smallFont, label, x, float64(bottom)+2, Grey)
 		}
 
 		if gr.title == "Counties sealed" && !g.world.Era.Modern {
-			g.drawText(screen, "No lockdowns in 1348", float64(left)+75, float64(top+graphHeight/2)-10, scaleGrey)
+			g.drawText(screen, "No lockdowns in 1348", float64(left)+75, float64(top+graphHeight/2)-10, Grey)
 			continue
 		}
 

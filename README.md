@@ -15,17 +15,17 @@ The whole island fits in the window, and each dot is **about 35 people**.
 | **Arrow keys** or drag | move around the map |
 | **+ / −** or mouse wheel | zoom in and out (up to about 60 km across, enough to see single dots in Dublin) |
 | **0** | show the whole island again |
-| **Y** | switch between **2026** and **1348** rules (starts a new outbreak) |
+| **Y** | switch between **2026** and **1348** rules (same seed, so you can compare the two eras on the same outbreak) |
 | **B** | switch background: satellite, beige map, population (with a key) |
 | **V** | switch view: dots, % infected now, % dead |
 | **[** and **]** | slow down / speed up |
 | **Click** a county | seal it or open it |
 | **Space** | pause |
-| **R** | start a new outbreak |
+| **R** | start a new outbreak (with a new seed) |
 
 The days stop when nobody is infected or incubating and no plague is left in the rats; the status line then says OUTBREAK OVER, and **R** starts a new outbreak. (Rats can restart an outbreak after the last human case, so it doesn't stop at the first day with no sick people.)
 
-Each outbreak starts at a random place, more likely where more people live. A yellow ring marks it, and the status line names the nearest town.
+Each outbreak starts at a random place, more likely where more people live. A yellow ring marks it, and the status line names the nearest town and shows the outbreak's **seed**. Run `go run ./src -seed 123456` to see that exact outbreak again.
 
 | Colour | Meaning |
 |---|---|
@@ -158,6 +158,53 @@ Single runs range from about 15,000 to 77,000, depending mostly on where the out
 
 The USA version shows the same thing: **mixing less decides the outcome**. Ireland's 2026 death toll is far lower than the USA's mainly because its 2020 response was faster and stricter.
 
+## Running on several cores
+
+The slowest parts of each day are shared between the computer's cores:
+- movement and trips;
+- who catches plague;
+- illnesses moving on;
+- counting crowds.
+
+Everything else runs in order on one core.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-cores N` | every core this machine has | how many cores to use; `-cores 1` is the one-core baseline |
+| `-seed N` | random (printed) | the outbreak's seed; batch run *r* uses seed + *r* − 1 |
+
+For example, `go run ./src -batch 10 -seed 1 -cores 1` and `go run ./src -batch 10 -seed 1` print **the same outbreaks**: once on one core, once on all of them.
+
+**How it works.**
+- The 200,000 dots are split into blocks of 4,096.
+- Each block gets its own random numbers, made from (seed, day, step, block). So a dot's random numbers don't depend on which core handles it, and **the same seed gives the same outbreak on any number of cores**.
+- Each core keeps taking the next block until none are left (fork-join), so faster and slower cores share the work fairly.
+
+**Testing and benchmarking.** The same commands work on Mac and Windows:
+
+```bash
+go test ./src -run SameResult
+go test ./src -run XXX -bench Day -benchtime 3x
+```
+
+- **`SameResult`** checks that 1 core, 2 cores and every core give exactly the same outbreaks.
+- **`Day`** times days 40–60 of three outbreaks at 1, 2, 4, 8… cores, up to the machine's own count, and reports `ms/day`. Go prints the machine's OS, chip and CPU at the top.
+- **Speed-up** at *N* cores = ms/day on 1 core ÷ ms/day on *N* cores.
+- **Reading the names:** Go adds the machine's core count to the end of every name, e.g. `cores=2-10`. The number after `cores=` is the one that counts.
+- **Why not 10× on 10 cores?** About 13% of each day still runs in order on one core: diagnosis, hospitals and tracing; the lockdown check; counting; and building the neighbour lists. That caps the speed-up (Amdahl's law). On the M5, cores beyond the 4 performance cores are slower efficiency cores.
+
+**Results:**
+
+| Machine | Cores | 1 core | 2 | 4 | 8 | all | Speed-up |
+|---|---|---|---|---|---|---|---|
+| Apple M5 (macOS) | 10 (4 performance + 6 efficiency) | 10.3 ms | 6.3 (1.6×) | 4.8 (2.2×) | 4.1 (2.5×) | 4.0 | **2.6×** |
+| *(add yours)* | | | | | | | |
+
+**Notes:**
+- **A seed replays exactly on the same machine.** A Mac with an Apple chip and a Windows PC may give slightly different outbreaks for the same seed. Their processors round some arithmetic differently (Apple chips can do a multiply and an add in one step). So compare averages across machines, not single runs.
+- **`go test -race ./src -run SameResult`** also checks for data races. On Windows it needs a C compiler (for example from MSYS2).
+- **Windows counts hyperthreads as cores** (e.g. 8 cores shown as 16), so expect little gain past the real number of cores. Newer Intel chips, like Apple's, mix fast and slower cores.
+
 ## Files
 
 | File | What's in it |
@@ -168,6 +215,8 @@ The USA version shows the same thing: **mixing less decides the outcome**. Irela
 | `src/live.go` | the window |
 | `src/graphs.go` | the four graphs beside the map |
 | `src/quarantine.go` | isolation hospitals, isolation at home and quarantine of close contacts |
+| `src/parallel.go` | seeded random numbers per block of dots, and sharing the slow steps between cores |
+| `src/bench_test.go` | the same-result test and the benchmark |
 | `src/maps/` | mask (where dots can go), population, satellite and beige maps, town list, county maps (a county number for every km, and every 250 m for drawing the borders) and county names |
 
 The maps are 380 × 480 pixels, 1 km per pixel, in an equal-area projection centred on Ireland (`+proj=laea +lat_0=53.5 +lon_0=-8`). Great Britain and the Isle of Man are painted as sea. People in coastal pixels whose centre is in the sea were moved onto the nearest land, so the island has 7.08 million people.

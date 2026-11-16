@@ -82,11 +82,14 @@ func (w *World) admit(a *Agent) {
 }
 
 // discharge frees a patient's bed when their illness ends. Survivors go home; the dead stay where they died.
+// It runs on several cores at once (from progress), so the bed count is changed under a lock.
 func (w *World) discharge(a *Agent) {
 	if a.Hospital == 0 {
 		return
 	}
-	w.Hospitals[a.Hospital].Patients--
+	w.bedLock.Lock()
+	w.Hospitals[a.Hospital].Patients-- // one bed fewer in use; the order doesn't matter
+	w.bedLock.Unlock()
 	a.Hospital = 0
 	if a.State != Dead {
 		a.goTo(a.HomeX, a.HomeY, 0)

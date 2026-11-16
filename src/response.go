@@ -109,8 +109,8 @@ func (w *World) updateStage() {
 
 // seekCare decides which day a newly ill person goes to a doctor. With pneumonic plague, waiting
 // a day or two is usually fatal.
-func (w *World) seekCare(a *Agent) {
-	if rand.Float64() < neverSeek { // some people never go
+func (w *World) seekCare(a *Agent, rng *rand.Rand) {
+	if rng.Float64() < neverSeek { // some people never go
 		a.SeekDay = 1 << 30 // a day that never comes
 		return
 	}
@@ -118,9 +118,9 @@ func (w *World) seekCare(a *Agent) {
 	if a.State == Pneumonic { // pneumonic plague
 		d = seekPneumonic // feels worse, so they go sooner
 	}
-	days := float64(d[0] + rand.IntN(d[1]-d[0]+1)) // a random delay between the shortest and longest
-	if rand.Float64() < costBarrier {              // put off by the cost of a GP visit
-		days += float64(costDelay[0] + rand.IntN(costDelay[1]-costDelay[0]+1)) // so they wait longer
+	days := float64(d[0] + rng.IntN(d[1]-d[0]+1)) // a random delay between the shortest and longest
+	if rng.Float64() < costBarrier {              // put off by the cost of a GP visit
+		days += float64(costDelay[0] + rng.IntN(costDelay[1]-costDelay[0]+1)) // so they wait longer
 	}
 	if w.Stage >= Emergency { // the outbreak is in the news
 		days *= alertSpeedUp // so people go sooner
@@ -130,15 +130,17 @@ func (w *World) seekCare(a *Agent) {
 
 // diagnose treats sick people who have seen a doctor and been recognised, traces contacts of
 // pneumonic cases, and starts pest control around each case. The first diagnosis starts the
-// official response.
+// official response. It runs on one core, in order, with one stream of random numbers per day,
+// because hospital beds go to whoever is diagnosed first.
 func (w *World) diagnose() {
-	var newPneumonic []*Agent // today's diagnosed pneumonic cases, whose contacts will be traced
-	for i := range w.Agents { // look at everyone
+	rng := newStream(w.Seed, w.Day, stepResponse, 0) // today's random numbers for diagnosis and tracing
+	var newPneumonic []*Agent                        // today's diagnosed pneumonic cases, whose contacts will be traced
+	for i := range w.Agents {                        // look at everyone
 		a := &w.Agents[i]
 		if !a.sick() || a.Treated || w.Day < a.SeekDay { // not ill, already treated, or not at a doctor yet
 			continue
 		}
-		if rand.Float64() >= diagnoseChance[w.Stage] && !a.quarantined(w.Day) { // the doctor doesn't recognise plague today (quarantined contacts are checked for it daily)
+		if rng.Float64() >= diagnoseChance[w.Stage] && !a.quarantined(w.Day) { // the doctor doesn't recognise plague today (quarantined contacts are checked for it daily)
 			continue
 		}
 		if w.FirstCaseDay < 0 { // this is the first case ever confirmed
@@ -149,16 +151,14 @@ func (w *World) diagnose() {
 		if isolateDiagnosed {
 			w.admit(a) // to an isolation hospital, or isolated at home if every bed is taken
 		}
-		w.Diagnosed++                                // count for the status line
-		w.LastCase[w.Map.CountyAt(a.X, a.Y)] = w.Day // the county they're in has a new case
-		w.LastIslandCase = w.Day
+		w.Diagnosed++ // count for the status line
 		if a.State == Pneumonic {
 			newPneumonic = append(newPneumonic, a) // their close contacts need tracing
 		}
 		w.startPestControl(a.X, a.Y) // send pest control to where they are
 	}
 	if contactTracing { // switched on in main.go
-		w.traceContacts(newPneumonic) // give today's cases' close contacts antibiotics
+		w.traceContacts(newPneumonic, rng) // give today's cases' close contacts antibiotics
 	}
 }
 
@@ -168,41 +168,47 @@ func (w *World) diagnose() {
 // them, the people they infected first (those are who tracing is meant to find), then whoever was
 // nearest. Each contact gets 7 days of preventive antibiotics, so anyone incubating pneumonic
 // plague never falls ill, and is quarantined at home for 7 days with a daily check.
-func (w *World) traceContacts(cases []*Agent) {
-	r := traceRadius * pneumonicRadius // how close counts as a close contact, in km
+func (w *World) traceContacts(cases []*Agent, rng *rand.Rand) {
 	for _, c := range cases {
-		var near []int // everyone close to this case who can still be traced
-		for i := range w.Agents {
+		for _, i := range w.closeContacts(c) {
 			a := &w.Agents[i]
-			if a.State == Dead || a.Treated || a.quarantined(w.Day) || a == c { // dead, isolated, already in quarantine, or the case
-				continue
-			}
-			if math.Hypot(a.X-c.X, a.Y-c.Y) < r {
-				near = append(near, i)
-			}
-		}
-		slices.SortFunc(near, func(i, j int) int { // the people they infected first, then the nearest
-			a, b := &w.Agents[i], &w.Agents[j]
-			if ea, eb := a.State == ExposedPneumonic, b.State == ExposedPneumonic; ea != eb {
-				if ea {
-					return -1
-				}
-				return 1
-			}
-			return cmp.Compare(math.Hypot(a.X-c.X, a.Y-c.Y), math.Hypot(b.X-c.X, b.Y-c.Y))
-		})
-		for _, i := range near[:min(len(near), contactsPerCase)] {
-			a := &w.Agents[i]
-			if rand.Float64() >= traceShare[w.Stage] { // not reached in time
+			if rng.Float64() >= traceShare[w.Stage] { // not reached in time
 				continue
 			}
 			if a.State == ExposedPneumonic {
-				a.Become(Susceptible) // antibiotics stop the infection
-				w.Prevented++         // count for the status line
+				a.Become(Susceptible, rng) // antibiotics stop the infection
+				w.Prevented++              // count for the status line
 			}
 			w.quarantine(a) // home for 7 days
 		}
 	}
+}
+
+// closeContacts lists up to contactsPerCase people close to a case who can still be traced: the
+// people the case infected first, then whoever was nearest.
+func (w *World) closeContacts(c *Agent) []int {
+	r := traceRadius * pneumonicRadius // how close counts as a close contact, in km
+	var near []int
+	for i := range w.Agents {
+		a := &w.Agents[i]
+		if a.State == Dead || a.Treated || a.quarantined(w.Day) || a == c { // dead, isolated, already in quarantine, or the case
+			continue
+		}
+		if math.Hypot(a.X-c.X, a.Y-c.Y) < r {
+			near = append(near, i)
+		}
+	}
+	slices.SortFunc(near, func(i, j int) int {
+		a, b := &w.Agents[i], &w.Agents[j]
+		if ea, eb := a.State == ExposedPneumonic, b.State == ExposedPneumonic; ea != eb {
+			if ea {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(math.Hypot(a.X-c.X, a.Y-c.Y), math.Hypot(b.X-c.X, b.Y-c.Y))
+	})
+	return near[:min(len(near), contactsPerCase)]
 }
 
 // ---------- Pest control ----------
@@ -244,18 +250,7 @@ func (w *World) updateLockdowns() {
 	if !countyLockdowns || !w.Era.Modern {
 		return
 	}
-	ill, people := make([]int, len(w.Sealed)), make([]int, len(w.Sealed)) // per county, by where people are today
-	for i := range w.Agents {
-		a := &w.Agents[i]
-		if a.State == Dead {
-			continue
-		}
-		c := w.Map.CountyAt(a.X, a.Y)
-		people[c]++
-		if a.State == Bubonic || a.State == Pneumonic {
-			ill[c]++
-		}
-	}
+	ill, people := w.illByCounty()
 	newlySealed := make([]bool, len(w.Sealed))
 	anyNew := false
 	for c := 1; c < len(w.Sealed); c++ { // every county (0 is the sea)
@@ -274,6 +269,23 @@ func (w *World) updateLockdowns() {
 	if anyNew {
 		w.sendHome(newlySealed)
 	}
+}
+
+// illByCounty counts the ill and the living in each county, by where people are today.
+func (w *World) illByCounty() (ill, people []int) {
+	ill, people = make([]int, len(w.Sealed)), make([]int, len(w.Sealed))
+	for i := range w.Agents {
+		a := &w.Agents[i]
+		if a.State == Dead {
+			continue
+		}
+		c := w.Map.CountyAt(a.X, a.Y)
+		people[c]++
+		if a.sick() {
+			ill[c]++
+		}
+	}
+	return ill, people
 }
 
 // toggleSeal seals or opens county c by hand (a click on the map). After that the rule leaves it alone.
