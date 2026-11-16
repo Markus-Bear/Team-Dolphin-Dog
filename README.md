@@ -244,15 +244,16 @@ Then commit `bench/`. Keep the laptop plugged in and close other programs while 
 
 **`dead` is also a check.** The same dots and seed must give the same deaths on every number of cores. The benchmark prints `same` or `DIFFERENT` for every run, and `summary.md` has a ✓ or ✗ for every number of dots.
 
-**The report** uses the **median** of the repeats, so one slow run doesn't spoil a result. It writes into `bench/`:
+**The report** uses the **median** of the repeats, so one slow run doesn't spoil a result. It writes into `bench/`, with one set of graphs for each set of rules (`-2026.png` and `-1348.png`):
 
 | File | What it shows |
 |---|---|
-| `speedup.png` | speed-up (1-core time ÷ *N*-core time) against cores, one line per number of dots; the dashed line is the ideal, *N* cores = *N* times faster |
-| `time.png` | ms per day against cores, with a bar from the fastest repeat to the slowest |
-| `efficiency.png` | speed-up ÷ cores: how much of each core is really used |
-| `scaling.png` | ms per day against dots, one line per number of cores |
-| `summary.md` | a table for each machine and number of dots, the ✓/✗ check, and the four graphs |
+| `population-2026.png` | **the main graph**: ms per day against dots, one line per number of cores, with a bar from the fastest repeat to the slowest |
+| `population-log-2026.png` | the same on log scales (each step ×10), so the small numbers of dots can be read too |
+| `speedup-2026.png` | speed-up (1-core time ÷ *N*-core time) against cores, one line per number of dots; the dashed line is the ideal, *N* cores = *N* times faster |
+| `time-2026.png` | ms per day against cores |
+| `efficiency-2026.png` | speed-up ÷ cores: how much of each core is really used |
+| `summary.md` | every graph, then a table for each machine and number of dots with the ✓/✗ check |
 
 Each machine in the file gets its own graph in every picture, one under the other. The graphs are drawn in Go with `golang.org/x/image`, so there is nothing to install.
 

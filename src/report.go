@@ -1,4 +1,5 @@
-// The benchmark report: reads bench/results.csv and writes four graphs and summary.md beside it.
+// The benchmark report: reads bench/results.csv and writes summary.md and five graphs for each
+// set of rules (1348 and 2026) beside it.
 //
 //	go run ./src -report bench
 //
@@ -31,6 +32,7 @@ import (
 
 // machineResults is everything measured on one machine with one set of rules.
 type machineResults struct {
+	era      string               // "2026" or "1348"
 	name     string               // e.g. "maxred: AMD Ryzen 5 4600H (12 logical cores), 2026 rules"
 	agents   []int                // the numbers of dots measured, smallest first
 	cores    []int                // the numbers of cores measured, smallest first
@@ -108,7 +110,7 @@ func readResults(name string) ([]*machineResults, error) {
 		label := fmt.Sprintf("%s: %s (%s logical cores), %s rules", get("machine"), get("cpu"), get("logical_cores"), get("era"))
 		r := byName[label]
 		if r == nil { // the first row from this machine
-			r = &machineResults{name: label, times: map[[2]int][]float64{}, deaths: map[string]int{}, sameDead: map[int]bool{}}
+			r = &machineResults{era: get("era"), name: label, times: map[[2]int][]float64{}, deaths: map[string]int{}, sameDead: map[int]bool{}}
 			byName[label] = r
 			list = append(list, r)
 		}
@@ -234,10 +236,24 @@ func (r *machineResults) efficiencyChart() chart {
 	})
 }
 
-// scalingChart: dots along the bottom and one line for each number of cores, as on the whiteboard.
-func (r *machineResults) scalingChart() chart {
-	c := chart{title: "Time for one day as the dots grow", xLabel: "dots (each step is ×10)", yLabel: "ms per simulated day (each step is ×10)",
-		logX: true, logY: true, xTicks: floats(r.agents), xName: dotsName, value: msName}
+// populationChart is the main graph: dots along the bottom and one line for each number of
+// cores, as on the whiteboard, with a bar from the fastest repeat to the slowest. With plain
+// scales it shows how the time grows; with log scales (each step ×10) the small numbers of dots
+// can be read too.
+func (r *machineResults) populationChart(log bool) chart {
+	c := chart{title: "Time for one day as the dots grow", xLabel: "dots", yLabel: "ms per simulated day",
+		xName: dotsName, value: msName}
+	if log {
+		c.title += " (log scales)"
+		c.xLabel, c.yLabel = "dots (each step is ×10)", "ms per simulated day (each step is ×10)"
+		c.logX, c.logY, c.xTicks = true, true, floats(r.agents)
+	} else { // round numbers along the bottom, from 0 to past the most dots
+		most := float64(r.agents[len(r.agents)-1])
+		step := niceStep(most / 8)
+		for v := 0.0; v < most+step; v += step {
+			c.xTicks = append(c.xTicks, v)
+		}
+	}
 	for _, n := range r.cores {
 		s := series{name: fmt.Sprintf("%d cores", n)}
 		if n == 1 {
@@ -285,6 +301,11 @@ var (
 		{0xe6, 0x9f, 0x00, 0xff}, // orange
 		{0x56, 0xb4, 0xe9, 0xff}, // sky blue
 		{0x1a, 0x1a, 0x1a, 0xff}, // black
+		{0x8c, 0x56, 0x4b, 0xff}, // brown
+		{0x7f, 0x7f, 0x7f, 0xff}, // grey
+		{0x88, 0x22, 0x55, 0xff}, // wine
+		{0x99, 0x99, 0x33, 0xff}, // olive
+		{0x44, 0xaa, 0x99, 0xff}, // teal
 	}
 )
 
@@ -554,7 +575,8 @@ func writeGraph(name string, machines []*machineResults, build func(*machineResu
 
 // ---------- The report ----------
 
-// writeReport reads results.csv in dir and writes the four graphs and summary.md beside it.
+// writeReport reads results.csv in dir and writes summary.md and, for each set of rules, the
+// five graphs beside it: speedup-2026.png, speedup-1348.png and so on.
 func writeReport(dir string) error {
 	machines, err := readResults(filepath.Join(dir, benchFile))
 	if err != nil {
@@ -564,47 +586,65 @@ func writeReport(dir string) error {
 		file, title string
 		build       func(*machineResults) chart
 	}{
-		{"speedup.png", "Speed-up", (*machineResults).speedUpChart},
-		{"time.png", "Time for one day", (*machineResults).timeChart},
-		{"efficiency.png", "Efficiency", (*machineResults).efficiencyChart},
-		{"scaling.png", "Time as the dots grow", (*machineResults).scalingChart},
+		{"population", "Time as the dots grow", func(r *machineResults) chart { return r.populationChart(false) }},
+		{"population-log", "Time as the dots grow, log scales", func(r *machineResults) chart { return r.populationChart(true) }},
+		{"speedup", "Speed-up", (*machineResults).speedUpChart},
+		{"time", "Time for one day", (*machineResults).timeChart},
+		{"efficiency", "Efficiency", (*machineResults).efficiencyChart},
 	}
 	var b strings.Builder
 	b.WriteString("# Benchmark results\n\nMade by `go run ./src -report " + dir + "` from `" + benchFile + "`. Don't edit it by hand.\n\n")
-	for _, g := range graphs {
-		if err := writeGraph(filepath.Join(dir, g.file), machines, g.build); err != nil {
-			return err
+	for _, era := range eras { // 2026 first, then 1348
+		var list []*machineResults // the machines measured with these rules
+		for _, r := range machines {
+			if r.era == era.Year {
+				list = append(list, r)
+			}
 		}
-		fmt.Fprintf(&b, "![%s](%s)\n\n", g.title, g.file)
-	}
-
-	// One table for each machine and number of dots.
-	for _, r := range machines {
-		fmt.Fprintf(&b, "## %s\n\n", r.name)
-		for _, agents := range r.agents {
-			same := "✓ same deaths on every core count"
-			if !r.sameDead[agents] {
-				same = "✗ DIFFERENT deaths on different core counts"
+		if len(list) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "# %s rules\n\n", era.Year)
+		for _, g := range graphs {
+			file := g.file + "-" + era.Year + ".png"
+			if err := writeGraph(filepath.Join(dir, file), list, g.build); err != nil {
+				return err
 			}
-			fmt.Fprintf(&b, "**%s dots** — %s\n\n", thousands(float64(agents)), same)
-			b.WriteString("| Cores | Median ms/day | Fastest – slowest | Runs | Speed-up | Efficiency |\n|---|---|---|---|---|---|\n")
-			for _, n := range r.cores {
-				t, ok := r.timeAt(agents, n)
-				if !ok {
-					continue
-				}
-				speed, efficiency := "–", "–" // unknown without a 1-core time
-				if s, ok := r.speedUp(agents, n); ok {
-					speed, efficiency = fmt.Sprintf("%.2f×", s), fmt.Sprintf("%.0f%%", 100*s/float64(n))
-				}
-				fmt.Fprintf(&b, "| %d | %.2f | %.2f – %.2f | %d | %s | %s |\n", n, t.median, t.lo, t.hi, len(r.times[[2]int{agents, n}]), speed, efficiency)
-			}
-			b.WriteString("\n")
+			fmt.Fprintf(&b, "![%s, %s rules](%s)\n\n", g.title, era.Year, file)
+			fmt.Println("wrote", filepath.Join(dir, file))
+		}
+		for _, r := range list {
+			writeTables(&b, r)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(dir, "summary.md"), []byte(b.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("Wrote speedup.png, time.png, efficiency.png, scaling.png and summary.md to %s\n", dir)
+	fmt.Println("wrote", filepath.Join(dir, "summary.md"))
 	return nil
+}
+
+// writeTables adds one machine's tables to the summary: one for each number of dots.
+func writeTables(b *strings.Builder, r *machineResults) {
+	fmt.Fprintf(b, "## %s\n\n", r.name)
+	for _, agents := range r.agents {
+		same := "✓ same deaths on every core count"
+		if !r.sameDead[agents] {
+			same = "✗ DIFFERENT deaths on different core counts"
+		}
+		fmt.Fprintf(b, "**%s dots** — %s\n\n", thousands(float64(agents)), same)
+		b.WriteString("| Cores | Median ms/day | Fastest – slowest | Runs | Speed-up | Efficiency |\n|---|---|---|---|---|---|\n")
+		for _, n := range r.cores {
+			t, ok := r.timeAt(agents, n)
+			if !ok {
+				continue
+			}
+			speed, efficiency := "–", "–" // unknown without a 1-core time
+			if s, ok := r.speedUp(agents, n); ok {
+				speed, efficiency = fmt.Sprintf("%.2f×", s), fmt.Sprintf("%.0f%%", 100*s/float64(n))
+			}
+			fmt.Fprintf(b, "| %d | %.2f | %.2f – %.2f | %d | %s | %s |\n", n, t.median, t.lo, t.hi, len(r.times[[2]int{agents, n}]), speed, efficiency)
+		}
+		b.WriteString("\n")
+	}
 }
