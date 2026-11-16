@@ -199,14 +199,17 @@ go test ./src -run XXX -bench Day -benchtime 3x
 | Machine | Cores | 1 core | 2 | 4 | 8 | all | Speed-up |
 |---|---|---|---|---|---|---|---|
 | Apple M5 (macOS) | 10 (4 performance + 6 efficiency) | 10.3 ms | 6.3 (1.6×) | 4.8 (2.2×) | 4.1 (2.5×) | 4.0 | **2.6×** |
+| AMD Ryzen 5 4600H (Windows) | 12 (6 cores, 2 threads each) | 27.3 ms | 20.1 (1.4×) | 15.7 (1.7×) | 13.3 (2.1×) | 13.0 | **2.1×** |
 | *(add yours)* | | | | | | | |
+
+The Ryzen row comes from `-bench` (2026 rules, 200,000 dots, median of 6 runs), not from `BenchmarkDay`; the full results are below.
 
 ### Benchmark: dots × cores
 
 `BenchmarkDay` only times 200,000 dots and only prints. The benchmark command times every number of dots on every number of cores, and **saves every run** to one file that all of us add to:
 
 ```bash
-go run ./src -bench            # about 5 minutes; adds rows to bench/results.csv
+go run ./src -bench            # 5–10 minutes with the default dots; adds rows to bench/results.csv
 go run ./src -report bench     # draws the graphs and bench/summary.md from that file
 ```
 
@@ -256,6 +259,33 @@ Then commit `bench/`. Keep the laptop plugged in and close other programs while 
 | `summary.md` | every graph, then a table for each machine and number of dots with the ✓/✗ check |
 
 Each machine in the file gets its own graph in every picture, one under the other. The graphs are drawn in Go with `golang.org/x/image`, so there is nothing to install.
+
+### Benchmark results: AMD Ryzen 5 4600H
+
+6 cores with 2 threads each (Windows counts 12), laptop plugged in. 11 numbers of dots from 10,000 to 7,000,000; 2026 rules with 3 repeats of days 40–60, 1348 rules with 2 repeats of days 40–50. **Every number of cores gave the same deaths for the same seed** (✓ for all 22 populations in `bench/summary.md`).
+
+| Dots | 2026: 1 core | 2026: 12 cores | 2026 speed-up | 1348: 1 core | 1348: 12 cores | 1348 speed-up |
+|---|---|---|---|---|---|---|
+| 10,000 | 1.5 ms | 1.2 ms | 1.2× | 0.9 ms | 0.6 ms | 1.6× |
+| 100,000 | 12.9 ms | 6.9 ms | 1.9× | 11.4 ms | 4.4 ms | 2.6× |
+| 500,000 | 75.5 ms | 29.2 ms | 2.6× | 85.3 ms | 23.7 ms | 3.6× |
+| 1,000,000 | 148 ms | 65.4 ms | 2.3× | 290 ms | 59.6 ms | 4.9× |
+| 3,000,000 | 458 ms | 198 ms | 2.3× | 3.6 s | 486 ms | 7.4× |
+| 7,000,000 | 1.17 s | 515 ms | 2.3× | 29.3 s | 3.4 s | **8.5×** |
+
+![Time against dots, 1348 rules](bench/population-1348.png)
+
+![Speed-up, 1348 rules](bench/speedup-1348.png)
+
+![Speed-up, 2026 rules](bench/speedup-2026.png)
+
+The rest of the graphs and every table are in [`bench/summary.md`](bench/summary.md).
+
+**What the results show:**
+- **2026 rules stop at about 2.3×.** Treatment keeps few people ill at once (about 350 of 1,000,000 dots on day 40), so a day is mostly moving everyone and sorting them into squares. Sorting into squares and the diagnosis pass go through every dot on one core, so a large part of each day can't be shared. By Amdahl's law that caps the speed-up, whatever the number of dots: in 2026 the time grows in line with the dots on every number of cores.
+- **1348 rules get up to 8.5×, and more with more dots.** Without treatment, thousands are ill at once (about 16,500 of 1,000,000 dots on day 40), and each sick dot checks the healthy dots near it. That checking is shared between the cores, and it grows faster than the dots: more dots on the same map means more sick dots *and* more neighbours for each. 7 times the dots (1M → 7M) took about 100 times as long on one core. So with more dots the shared part outweighs the one-core part more and more.
+- **Small populations hardly speed up.** At 10,000 dots a day takes about 1 ms; starting and joining the goroutines costs nearly as much as the work they share.
+- **Past 6 cores is hyperthreading.** The Ryzen has 6 real cores. For 2026, 8 and 12 threads are only about 10% faster than 6; for 1348 with millions of dots they still help (5.5× at 6, 8.5× at 12), because a thread waiting for memory leaves its core free for the other thread.
 
 **Notes:**
 - **A seed replays exactly on the same machine.** A Mac with an Apple chip and a Windows PC may give slightly different outbreaks for the same seed. Their processors round some arithmetic differently (Apple chips can do a multiply and an add in one step). So compare averages across machines, not single runs.
