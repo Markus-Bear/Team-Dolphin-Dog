@@ -2,11 +2,34 @@
 
 What if the Black Death broke out in Ireland? Compare **1348** conditions (the year it really arrived, with no medicine) with **2026** conditions (antibiotics, cars, and a public-health response modelled on Ireland's handling of COVID-19). Both use the real 2025 population of the whole island.
 
+This is Team Dolphin Dog's project: one agent-based simulation, run on one core and on many, with benchmarks of the speed-up.
+
 ```bash
 go run ./src
 ```
 
 The whole island fits in the window, and each dot is **about 35 people**.
+
+**Contents:** [Getting started](#getting-started) · [Controls](#controls) · [How the model works](#how-the-model-works) · [Settings](#settings) · [The 2026 response](#the-2026-response) · [Results](#results) · [Running on several cores](#running-on-several-cores) · [Benchmark](#benchmark-dots--cores) · [Files](#files) · [Sources](#sources)
+
+## Getting started
+
+You need **Go 1.21 or newer**. `go.mod` asks for Go 1.27.1; an older Go downloads that version by itself the first time. The window uses [Ebitengine](https://ebitengine.org). We run it on Windows and macOS, and there is nothing else to install.
+
+Run every command from the top folder of the repository (the one with `go.mod`):
+
+| Command | What it does |
+|---|---|
+| `go run ./src` | opens the window with a random outbreak |
+| `go run ./src -seed 123456` | the same outbreak again (the seed is printed and shown in the window) |
+| `go run ./src -batch 5` | 5 outbreaks of each era without a window, with the deaths of each and the average |
+| `go run ./src -batch 5 -cores 1` | the same on one core, as a baseline |
+| `go test ./src -run SameResult` | checks that 1, 2 and every core give exactly the same outbreak |
+| `go test ./src -run XXX -bench Day -benchtime 3x` | quick benchmark: ms per day on 1, 2, 4 … all cores |
+| `go run ./src -bench` | full benchmark; adds every run to `bench/results.csv` |
+| `go run ./src -report bench` | draws the graphs and `bench/summary.md` from that file |
+
+Every command-line flag is listed under [Command-line flags](#command-line-flags).
 
 ## Controls
 
@@ -40,38 +63,12 @@ Each outbreak starts at a random place, more likely where more people live. A ye
 
 The dead are not drawn, but they are counted. The numbers at the top of the window and under the map are in real people (dots × about 35), so they move in steps of about 35.
 
-### County lockdowns
-
-Counties close their borders with the same rule as the towns in our Team-Dolphin-Dog simulation:
-
-- **A county seals** when 0.5% of the people in it are ill (bubonic or pneumonic). It **reopens** when that falls below 0.25%. The setting is `lockdownAt` in `response.go`.
-- **Click a county** to seal or open it yourself. After that the rule leaves it alone until the next outbreak.
-- **While a county is sealed**, nobody crosses its border: daily movement and trips that would cross it don't happen. On the day it closes, everyone is put on the right side first. Travellers and people visiting go home, and so do diagnosed people isolating at home. Ambulances taking patients to hospital can still cross.
-- **Rats and fleas still cross county borders.** A border closure doesn't stop them.
-- **1348** doesn't seal counties by itself, but you can still click them.
-
-The 0.5% is lower than the 5% the towns use, because in 2026 no county ever gets near 5% ill at once (1–2% at most). The status line shows how many counties are sealed, and the CSV has a `counties_sealed` column.
-
-### Isolation and quarantine
-
-In 2026, the quarantine works like the one in our Team-Dolphin-Dog simulation, with numbers for Ireland:
-
-- **Every county has an isolation hospital**, drawn as a white square with a red cross where the most people in the county live. It turns pale red when it is full. Zoom in to see beds used / beds.
-- **Beds come from real bed numbers.** The Republic has about 2.1 public acute beds per 1,000 people and Northern Ireland about 3.0. A fifth of them are freed for plague by cancelling planned care, as hospitals did in March 2020. That's about 3,300 beds for the whole island.
-- **A diagnosed person goes to their county's hospital.** If it is full, an ambulance takes them to the nearest hospital with a free bed, even across a sealed border. Patients can't infect anyone. When the illness ends, survivors go home.
-- **When every bed on the island is taken, diagnosed people isolate at home** with antibiotics. They stay put but still infect a quarter as many people as before, because they share a home. Pneumonic plague needs hospital care, so at home it kills 1.5 times as often (46% instead of 31%).
-- **Close contacts are quarantined for 7 days.** For each diagnosed pneumonic case, tracers look for up to 5 close contacts (one dot is about 35 people, so that's about 5 contacts each), starting with the people the case infected. Those reached in time get 7 days of preventive antibiotics, which stops the illness if they caught it, and stay at home for 7 days. A doctor checks them every day, so if they fall ill anyway they are diagnosed that day.
-
-Plague guidance only asks contacts who refuse antibiotics to stay at home. Quarantining every traced contact is the stricter COVID-19-style rule, and an assumption here.
-
-The third status line shows how many people are in hospital, isolating at home and in quarantine, and the CSV has `in_hospital`, `isolating_at_home` and `quarantined` columns (in dots).
-
 ### Graphs
 
 Four graphs beside the map follow the outbreak day by day:
 
 - **Everyone**: how many people are in each state, on a scale of the whole island. This is the clearest graph for 1348.
-- **Caught it or ill now**: only the four sick states, scaled to the highest so far, so a small 2026 outbreak still shows. The black line is people in hospital, as in Team-Dolphin-Dog.
+- **Caught it or ill now**: only the four sick states, scaled to the highest so far, so a small 2026 outbreak still shows. The black line is people in hospital, as in the first version.
 - **Deaths per day (7-day average)**: averaged over a week, because the counts move in steps of about 35 people.
 - **Counties sealed**: out of 32 (2026 only).
 
@@ -85,6 +82,86 @@ Press **V** to colour the island in 10 km squares instead of dots:
 - **% dead**: the share who have died so far, counted where they died. This shows where it has been.
 
 Colours run from pale yellow (0.5%) through orange (2%) and red (10%) to dark red (50% or more), with a key beside the map. Squares with fewer than 5 dots are left blank.
+
+## How the model works
+
+### A day
+
+One step is one day. Each dot has a home and moves around it every day: usually close, at most 10 km on foot in 1348 and 24 km by car or bus in 2026. Ill people move only a quarter as far. In 2026 a dot also has a 0.5% chance a day of a trip of 1 to 7 days, up to 300 km, to a place picked by population. People with symptoms, diagnosed people and quarantined contacts don't start trips, but people still incubating do, and carry plague with them.
+
+Each day runs in this order (`Step` in `main.go`):
+
+1. **Travel**: everyone moves; trips start and end.
+2. **Rats**: plague spreads among the rats; dying rats let their fleas loose.
+3. **Who catches plague**: decided from the start-of-day picture and applied afterwards, so the order of the dots doesn't matter.
+4. **Illnesses move on**: people fall ill, die or recover, and today's new infections take hold.
+5. **Diagnosis** (2026 only): doctors diagnose and treat, patients go to hospital, contacts are traced, pest control is sent.
+6. **Response and lockdowns** (2026 only): the response moves to its next stage; counties seal or reopen.
+7. **Counting**: today's numbers are saved for the graphs and the CSV.
+
+Steps 1, 3 and 4 run on several cores (see [Running on several cores](#running-on-several-cores)).
+
+### Health states
+
+| State | How long | What happens next |
+|---|---|---|
+| Healthy | until caught | caught bubonic or caught pneumonic |
+| Caught bubonic, not ill yet | 2–8 days (CDC) | ill with bubonic |
+| Caught pneumonic, not ill yet | 1–3 days (CDC) | ill with pneumonic |
+| Ill with bubonic | 4–10 days (assumption) | untreated: 50% die (WHO: 30–60%), 10% turn pneumonic, the rest recover. Treated: 13% die |
+| Ill with pneumonic | 1–3 days (WHO) | untreated: 99% die. Treated: 31% die in hospital, 46% at home |
+| Recovered | for good | immune |
+
+### Three ways to catch it
+
+1. **Breathing it in** from someone with pneumonic plague within 2 km.
+2. **Human fleas and lice** from someone with bubonic plague within 2.5 km.
+3. **A rat-flea bite.** The island is split into 20 km areas of rats. Rats live where people live: an area with 10 people per km² is a third full, with 1,000 or more it is full. Plague spreads among the rats in an area and a little to the next areas; a quarter of the infected rats die each day, and each dead rat lets its fleas loose to look for a new host. The more loose fleas in an area, the more bites.
+
+An outbreak starts with one ill person and plague in 5% of the rats of three areas around them.
+
+**Crowds.** In a city a sick dot has hundreds of healthy dots near it. So that it doesn't infect all of them, each neighbour's chance is shared out: a pneumonic case infects about 0.65 people a day on average (about 1.3 over the illness; Gani & Leach, 2004), however crowded it is. In 2026, mixing less lowers routes 1 and 2 further.
+
+**Finding neighbours quickly.** Each day the sick and the healthy dots are sorted into squares 2.5 km wide (the furthest any infection reaches). A healthy dot then only checks the sick dots in the 3 × 3 squares around it, instead of every dot on the island.
+
+### 1348 and 2026
+
+| Setting | 1348 | 2026 | Why |
+|---|---|---|---|
+| Rat-flea bites (per loose flea) | 0.1 a day | 0.01 a day | modern housing and rat control (assumption) |
+| Human fleas and lice (per sick neighbour) | 0.3 a day, about 0.3 people infected a day | 0.03 a day, about 0.05 people a day | modern hygiene (assumption) |
+| Breathing it in (per sick neighbour) | 0.3 a day, about 0.65 people a day | the same | it's as easy to breathe in as ever |
+| Daily movement | up to 10 km | up to 24 km | on foot / by car or bus |
+| Trips | none | 0.5% a day, up to 300 km | assumption |
+| Medicine and a public-health response | no | yes | see [The 2026 response](#the-2026-response) |
+
+The settings are in `Era1348` and `Era2026` in `maps.go`, and the disease settings at the top of `main.go`.
+
+### County lockdowns
+
+Counties close their borders with the same rule as the towns in the first version of our simulation (four towns, each with a hospital):
+
+- **A county seals** when 0.5% of the people in it are ill (bubonic or pneumonic). It **reopens** when that falls below 0.25%. The setting is `lockdownAt` in `response.go`.
+- **Click a county** to seal or open it yourself. After that the rule leaves it alone until the next outbreak.
+- **While a county is sealed**, nobody crosses its border: daily movement and trips that would cross it don't happen. On the day it closes, everyone is put on the right side first. Travellers and people visiting go home, and so do diagnosed people isolating at home. Ambulances taking patients to hospital can still cross.
+- **Rats and fleas still cross county borders.** A border closure doesn't stop them.
+- **1348** doesn't seal counties by itself, but you can still click them.
+
+The 0.5% is lower than the 5% the towns use, because in 2026 no county ever gets near 5% ill at once (1–2% at most). The status line shows how many counties are sealed, and the CSV has a `counties_sealed` column.
+
+### Isolation and quarantine
+
+In 2026, the quarantine works like the one in the first version of our simulation, with numbers for Ireland:
+
+- **Every county has an isolation hospital**, drawn as a white square with a red cross where the most people in the county live. It turns pale red when it is full. Zoom in to see beds used / beds.
+- **Beds come from real bed numbers.** The Republic has about 2.1 public acute beds per 1,000 people and Northern Ireland about 3.0. A fifth of them are freed for plague by cancelling planned care, as hospitals did in March 2020. That's about 3,300 beds for the whole island.
+- **A diagnosed person goes to their county's hospital.** If it is full, an ambulance takes them to the nearest hospital with a free bed, even across a sealed border. Patients can't infect anyone. When the illness ends, survivors go home.
+- **When every bed on the island is taken, diagnosed people isolate at home** with antibiotics. They stay put but still infect a quarter as many people as before, because they share a home. Pneumonic plague needs hospital care, so at home it kills 1.5 times as often (46% instead of 31%).
+- **Close contacts are quarantined for 7 days.** For each diagnosed pneumonic case, tracers look for up to 5 close contacts (one dot is about 35 people, so that's about 5 contacts each), starting with the people the case infected. Those reached in time get 7 days of preventive antibiotics, which stops the illness if they caught it, and stay at home for 7 days. A doctor checks them every day, so if they fall ill anyway they are diagnosed that day.
+
+Plague guidance only asks contacts who refuse antibiotics to stay at home. Quarantining every traced contact is the stricter COVID-19-style rule, and an assumption here.
+
+The third status line shows how many people are in hospital, isolating at home and in quarantine, and the CSV has `in_hospital`, `isolating_at_home` and `quarantined` columns (in dots).
 
 ## Settings
 
@@ -106,6 +183,32 @@ Everything is switched on and off at the top of `main.go`:
 
 The six measures only affect 2026.
 
+### Command-line flags
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-seed N` | random (printed) | the outbreak's seed; batch run *r* uses seed + *r* − 1 |
+| `-agents N` | 200,000 | how many dots: from 10,000 (1 dot ≈ 708 people) to 7,000,000 (1 dot ≈ 1 person). With `-bench`, a list such as `10000,200000` |
+| `-cores N` | every core this machine has | how many cores to use; `-cores 1` is the one-core baseline. With `-bench`, a list such as `1,2,4` |
+| `-batch N` | off | run N outbreaks of each era (2026, then 1348) without a window. N must be given |
+| `-bench` | off | the benchmark (see [Benchmark: dots × cores](#benchmark-dots--cores)); also takes `-repeats`, `-days`, `-from-day`, `-era`, `-machine` and `-cpu` |
+| `-report DIR` | off | draw the benchmark graphs and `summary.md` from `DIR/results.csv` |
+
+### plague.csv
+
+When the window closes, the outbreak on screen is saved to `plague.csv`, one row per day. Counts are in dots unless they say otherwise.
+
+| Column | Meaning |
+|---|---|
+| `day` | days since the outbreak began |
+| `susceptible` … `dead` | dots in each health state |
+| `response_stage` | how far the 2026 response has got |
+| `counties_sealed` | sealed counties, out of 32 |
+| `in_hospital`, `isolating_at_home`, `quarantined` | dots in isolation and quarantine |
+| `new_deaths` | deaths since the day before |
+| `estimated_real_deaths` | deaths so far in real people (dots × people per dot) |
+| `era`, `began`, `seed` | the rules, where the outbreak began, and its seed |
+
 ## The 2026 response
 
 One response covers the whole island, although Northern Ireland has its own health service. The numbers come from how Ireland handled COVID-19 in 2020:
@@ -114,69 +217,74 @@ One response covers the whole island, although Northern Ireland has its own heal
 |---|---|---|
 | Public health emergency | 12 days after the first confirmed case | 2020: first case 29 Feb, schools closed 12 Mar |
 | Stay-at-home order | 27 days after | 2020: stay-at-home order 27 Mar. Northern Ireland was similar (schools closed 18 Mar, UK lockdown 23 Mar). |
+| Going to a doctor | 2–6 days after falling ill with bubonic, 1–3 with pneumonic; 15% never go (assumptions) | bubonic plague starts like flu; pneumonic symptoms are dramatic |
+| Delays once it's in the news | 70% as long, from the public health emergency on (assumption) | |
 | Put off seeing a doctor by cost | 19% | 25% in the Republic delay GP visits because of cost (about 58% pay €50–80 a visit). GP care is free in Northern Ireland. Weighted by population. |
 | Mixing less | 35% at the emergency stage, then 75% | Contacts fell 74% under the 2020 UK lockdown; Ireland's COVID-19 reproduction number fell to 0.7–1.0 by mid-April 2020 |
 | Trips still happening | 65%, then 30% | Car traffic fell about 35% after schools closed and about 70% under the stay-at-home order |
 | Contacts reached in time | 30% → 40% → 50% (assumption) | The HSE reached 94% of COVID-19 contacts, usually within a day, but only those treated before falling ill count |
 | Diagnosis chance | 2% a day at first, rising to 30% (assumption) | Plague is notifiable at once in Ireland, but Irish doctors have not seen it in modern times |
-| County lockdowns | sealed while 0.5% or more of a county is ill, reopened below 0.25% | the Team-Dolphin-Dog town rule |
+| County lockdowns | sealed while 0.5% or more of a county is ill, reopened below 0.25% | the town rule from the first version |
 | Plague beds | about 3,300 (a fifth of 16,800 acute beds) | about 11,000 public acute beds in the Republic (3.9 million bed days in 2023, ESRI) and 5,835 in Northern Ireland (NISRA, 2024/25); the fifth is an assumption |
 | Isolation | in hospital until the illness ends; at home when beds run out | pneumonic patients need airborne precautions for at least 48 hours of antibiotics (NSW plague guideline) |
 | At home | infects a quarter as many; pneumonic deaths × 1.5 (assumptions) | |
 | Close contacts | up to 5 per pneumonic case, 7 days of antibiotics and quarantine | 7 days of preventive antibiotics and daily checks (NSW plague guideline) |
-| Pest control | within 30 km of each case, after 10 days (assumption) | Rats are the owner's or council's job; the HSE treats homes only in Dublin |
-| Death rate when treated | 13% bubonic, 31% pneumonic | Clinical review of treated cases (same as the USA version) |
+| Pest control | within 30 km of each case, after 10 days; fleas first, then rats after a week; under the stay-at-home order also wherever rats have plague (assumptions) | Rats are the owner's or council's job; the HSE treats homes only in Dublin |
+| Death rate when treated | 13% bubonic, 31% pneumonic | Clinical review of treated cases |
 
 ## Results
 
-From `go run ./src -batch`:
+From `go run ./src -batch 30 -seed 1` (200,000 dots, seeds 1–30), measured on this version of the code:
 
 | Rules | Average deaths | Range |
 |---|---|---|
-| **2026** | **≈ 34,000** (0.5%) | single runs vary a lot (36 runs; standard deviation about 17,000) |
-| **1348** | **≈ 4.4 million** (62%) | 4.40 – 4.43 million (5 runs) |
+| **2026** | **≈ 30,000** (0.4%) | 10,300 – 59,500 (standard deviation about 15,700) |
+| **1348** | **≈ 4.4 million** (62%) | 4.39 – 4.43 million |
 
-The 2026 row was measured before the current county rule and the isolation hospitals. With both, 24 runs of 2026 averaged about 37,000 deaths (10,500 to 73,000). The plague beds filled up in 15 of the 24 runs, and up to about 2,300 contacts were in quarantine at once.
-
-These are not predictions. Pneumonic plague infects only about 1.3 people per case, so small changes push it either side of growing or dying out.
+These are not predictions. Pneumonic plague infects only about 1.3 people per case, so small changes push it either side of growing or dying out. Single 2026 runs vary a lot, depending mostly on where the outbreak starts.
 
 ### What each measure is worth
 
-2026 rules, with one measure switched off at a time. These rows were measured with eight runs each, before county lockdowns were added:
+2026 rules, with one measure switched off at a time (set to `false` at the top of `main.go`), 20 runs each with seeds 1–20:
 
 | Switched off | Average deaths |
 |---|---|
-| nothing (all on) | ≈ 40,000 |
-| `isolateDiagnosed` | ≈ 35,000 |
-| `contactTracing` | ≈ 35,000 |
-| `travelCuts` | ≈ 36,000 |
-| `socialDistancing` | **≈ 5.1 million** |
+| nothing (all on) | ≈ 28,300 |
+| `isolateDiagnosed` | ≈ 32,700 |
+| `quarantineContacts` | ≈ 28,500 |
+| `contactTracing` | ≈ 28,800 |
+| `travelCuts` | ≈ 28,300 |
+| `countyLockdowns` | ≈ 27,800 |
+| `socialDistancing` | **≈ 5.4 million** (76%; 15 runs) |
 
-Single runs range from about 15,000 to 77,000, depending mostly on where the outbreak starts. So the first four rows are all the same within that noise.
+Single runs range from about 10,000 to 60,000, so every row except the last is the same within that noise. Isolation in hospital helps a little; county lockdowns make no measurable difference. By the time counties seal, mixing less and travel cuts have already slowed spread between people, and most 2026 deaths then come from rat fleas, which ignore county borders.
 
-**County lockdowns**, measured with the earlier rule (seal for 14 days after a county's last diagnosed case, and every county under the stay-at-home order), 36 runs each: about 33,600 deaths with them and 37,600 without. That's about 11% fewer, but it's within the run-to-run noise. By the time counties seal, mixing less and travel cuts have already slowed spread between people. Most 2026 deaths then come from rat fleas, which ignore county borders. Without distancing, 2026 is even worse than 1348 (about 73% die). Faster travel spreads pneumonic plague, which is nearly always fatal untreated, across the island before doctors recognise it.
+Without distancing, 2026 is even worse than 1348 (about 76% die, against 62%). Faster travel spreads pneumonic plague, which is nearly always fatal untreated, across the island before doctors recognise it.
 
-The USA version shows the same thing: **mixing less decides the outcome**. Ireland's 2026 death toll is far lower than the USA's mainly because its 2020 response was faster and stricter.
+In short, **mixing less decides the outcome**.
 
 ## Running on several cores
 
-The slowest parts of each day are shared between the computer's cores:
-- movement and trips;
-- who catches plague;
-- illnesses moving on;
-- counting crowds.
+The slowest parts of each day are shared between the computer's cores. The code for this is in `parallel.go`.
 
-Everything else runs in order on one core.
+| Shared between the cores | On one core, in order |
+|---|---|
+| placing everyone's home (setting up) | the plague among the rats (only about 450 areas) |
+| movement and trips | sorting the dots into the 2.5 km squares |
+| counting the healthy dots near each sick dot | diagnosis, hospital beds and contact tracing |
+| who catches plague | the response stage and the county lockdown check |
+| illnesses moving on | counting each state for the graphs and the CSV |
 
-| Flag | Default | What it does |
-|---|---|---|
-| `-cores N` | every core this machine has | how many cores to use; `-cores 1` is the one-core baseline |
-| `-seed N` | random (printed) | the outbreak's seed; batch run *r* uses seed + *r* − 1 |
-| `-agents N` | 200,000 | how many dots; anything from 10,000 (1 dot ≈ 708 people) to 7,000,000 (1 dot ≈ 1 person) |
+Why the one-core parts stay on one core:
+- **Diagnosis** gives out hospital beds. Beds go to whoever is diagnosed first, so the order must always be the same, and it uses one stream of random numbers a day.
+- **Sorting into squares** adds each dot to the front of its square's list. Two cores adding to the same list at once would lose dots.
+- The rest is small, or a single pass that only counts.
+
+**Safe sharing.** In the shared steps each dot only changes itself. New infections are first written to one list per block (no other core touches it) and only applied after every block has finished. The one thing several cores change at once is the count of beds in use when patients leave hospital, and that is behind a lock (`bedLock`).
 
 For example, `go run ./src -batch 10 -seed 1 -cores 1` and `go run ./src -batch 10 -seed 1` print **the same outbreaks**: once on one core, once on all of them.
 
-**How it works.**
+**How the work is split.**
 - The 200,000 dots are split into blocks of 4,096.
 - Each block gets its own random numbers, made from (seed, day, step, block). So a dot's random numbers don't depend on which core handles it, and **the same seed gives the same outbreak on any number of cores**.
 - Each core keeps taking the next block until none are left (fork-join), so faster and slower cores share the work fairly.
@@ -262,7 +370,7 @@ Each machine in the file gets its own graph in every picture, one under the othe
 
 ### Benchmark results: AMD Ryzen 5 4600H
 
-6 cores with 2 threads each (Windows counts 12), laptop plugged in. 11 numbers of dots from 10,000 to 7,000,000; 2026 rules with 3 repeats of days 40–60, 1348 rules with 2 repeats of days 40–50. **Every number of cores gave the same deaths for the same seed** (✓ for all 22 populations in `bench/summary.md`).
+6 cores with 2 threads each (Windows counts 12), laptop plugged in. 11 numbers of dots from 10,000 to 7,000,000; 2026 rules with 3 repeats of days 40–60 (6 for 10,000, 50,000, 200,000 and 1,000,000 dots, which were run twice), 1348 rules with 2 repeats of days 40–50. **Every number of cores gave the same deaths for the same seed** (✓ for all 22 populations in `bench/summary.md`).
 
 | Dots | 2026: 1 core | 2026: 12 cores | 2026 speed-up | 1348: 1 core | 1348: 12 cores | 1348 speed-up |
 |---|---|---|---|---|---|---|
