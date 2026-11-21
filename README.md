@@ -395,6 +395,38 @@ The rest of the graphs and every table are in [`bench/summary.md`](bench/summary
 - **Small populations hardly speed up.** At 10,000 dots a day takes about 1 ms; starting and joining the goroutines costs nearly as much as the work they share.
 - **Past 6 cores is hyperthreading.** The Ryzen has 6 real cores. For 2026, 8 and 12 threads are only about 10% faster than 6; for 1348 with millions of dots they still help (5.5× at 6, 8.5× at 12), because a thread waiting for memory leaves its core free for the other thread.
 
+
+### Why do the graphs look like this?
+
+Some points on the graphs look strange at first. Each one has a reason.
+
+**Why are the bars so long for 3M, 5M and 7M dots?** (`population-2026.png`, `population-1348.png`)
+The three repeats are three different outbreaks (seeds 11, 12 and 13), and some outbreaks are much bigger than others. On day 40 in 2026, with 3,000,000 dots, seed 13 has about 3,000 sick dots, while seeds 11 and 12 have 600 and 340. More sick dots means more work, so seed 13 took 2–4 times as long as the others. In 1348 with 1,000,000 dots, seed 11 has about twice as many sick dots as seed 12. So the bars show how much outbreaks differ, not how unsteady the timing is. Each outbreak runs with the same seed on every number of cores, so the speed-ups still compare like with like.
+
+**Why does 3M dots dip at 8 cores in `speedup-2026.png`?**
+One slow run. At 8 cores, seed 11 took 251 ms per day; at 6 and 12 cores it took 214 and 198 ms. With three repeats the median is the middle one, and because seed 13 is always slowest, the middle one is the slower of seeds 11 and 12, which was that unlucky 251 ms. Something else on the laptop probably slowed that single run. Without it the speed-up would be about 2.3×, the same as its neighbours. The other small dips and bumps between 4 and 12 cores (2M at 8 cores, 5M at 6 cores, 50k–1M at 12 cores) are under 5% and are noise of the same kind.
+
+**Why does 10,000 dots get slower after 6 cores?** (`speedup-2026.png`, `speedup-1348.png`)
+At 10,000 dots a day takes about 1 ms, and there are only 3 blocks of 4,096 dots to share out. So 4 cores already have more than enough. Extra cores only add the cost of starting goroutines and waiting for them all to finish, and that cost is now a large part of the 1 ms. It's the clearest case of parallelism not paying off for small work.
+
+**Why is the 2026 speed-up flat at about 2.3×, and why isn't the biggest population the fastest?** (`speedup-2026.png`)
+In 2026 few dots are ill at once, so most of a day is moving everyone, sorting them into squares and the diagnosis pass. The last two go through every dot on one core. More dots make both the shared and the one-core part bigger by the same amount, so the speed-up doesn't grow with the dots (Amdahl's law). The lines from 50k to 7M all end between 1.9× and 2.6×. That spread is about what three repeats can tell apart, so 500k being highest (2.6×) doesn't mean 500k is special.
+
+**Why does 1348 get faster with more dots, up to 8.5×?** (`speedup-1348.png`, `efficiency-1348.png`)
+Without treatment thousands are ill at once, and every sick dot checks the healthy dots near it. That check is shared between the cores. It grows much faster than the dots, because more dots on the same map means more sick dots and more neighbours for each. With millions of dots it is nearly all of the day, so 2 cores are almost exactly 2 times faster (efficiency close to 100%).
+
+**Why does 2026 lose a third of its efficiency already at 2 cores?** (`efficiency-2026.png`)
+The one-core part doesn't get shorter with more cores. At 2 cores the shared part halves but the one-core part stays, so the day takes about 70% of the 1-core time instead of 50%. Every extra core shrinks only the shared part further, so the curve keeps falling.
+
+**Why are the 2026 lines straight but the 1348 lines curve upwards?** (`population-2026.png`, `population-1348.png`)
+In 2026 the work per dot stays about the same (moving, sorting, diagnosis), so twice the dots takes about twice the time: a straight line. In 1348 the neighbour checking grows faster than the dots, so 7 times the dots (1M → 7M) took about 100 times as long on one core: a curve that bends up.
+
+**Why is 1348 faster than 2026 at small populations, but 25 times slower at 7M?** (`time-2026.png`, `time-1348.png`)
+1348 has no doctors, so it skips the diagnosis pass, which makes a small day quicker (0.9 ms against 1.5 ms at 10,000 dots). With millions of dots the neighbour checking takes over and 1348 is far slower (29 s against 1.2 s per day on 1 core).
+
+**Why do the 10k and 50k points in 2026 have wide bars, even though they're small?** (`time-2026.png`, `population-log-2026.png`)
+10,000, 50,000, 200,000 and 1,000,000 dots were measured twice, at 12:44 and 13:39, so they have 6 runs. In the second session 10k and 50k were 50–70% slower, but 200k and 1M were the same. We don't know why for sure. Most likely the laptop was busy for the first minutes of the second session, for example Windows scanning the newly built program, and only the first, small populations were run in that time. Both sessions measured every number of cores, so the speed-ups still compare like with like.
+
 **Notes:**
 - **A seed replays exactly on the same machine.** A Mac with an Apple chip and a Windows PC may give slightly different outbreaks for the same seed. Their processors round some arithmetic differently (Apple chips can do a multiply and an add in one step). So compare averages across machines, not single runs.
 - **`go test -race ./src -run SameResult`** also checks for data races. On Windows it needs a C compiler (for example from MSYS2).
