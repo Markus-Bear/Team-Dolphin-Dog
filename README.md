@@ -10,7 +10,7 @@ go run ./src
 
 The whole island fits in the window, and each dot is **about 35 people**.
 
-**Contents:** [Getting started](#getting-started) · [Controls](#controls) · [How the model works](#how-the-model-works) · [Settings](#settings) · [The 2026 response](#the-2026-response) · [Results](#results) · [Running on several cores](#running-on-several-cores) · [Benchmark](#benchmark-dots--cores) · [Files](#files) · [Sources](#sources)
+**Contents:** [Getting started](#getting-started) · [Controls](#controls) · [How the model works](#how-the-model-works) · [Settings](#settings) · [The 2026 response](#the-2026-response) · [Results](#results) · [Running on several cores](#running-on-several-cores) · [Benchmark](#benchmark-dots--cores) · [Files](#files) · [Contributions](#contributions) · [Sources](#sources)
 
 ## Getting started
 
@@ -451,6 +451,15 @@ In 2026 the work per dot stays about the same (moving, sorting, diagnosis), so t
 
 The maps are 380 × 480 pixels, 1 km per pixel, in an equal-area projection centred on Ireland (`+proj=laea +lat_0=53.5 +lon_0=-8`). Great Britain and the Isle of Man are painted as sea. People in coastal pixels whose centre is in the sea were moved onto the nearest land, so the island has 7.08 million people.
 
+## Contributions
+
+| Contribution | Names |
+|---|---|
+| Sequential version | Gleb Tutubalin C00290944, Markus Mukiiza C00166672, Maksym Redchenko C00302240, Hamed Zon C00259228 |
+| Parallel version | Gleb Tutubalin C00290944, Markus Mukiiza C00166672 |
+| Benchmark | Maksym Redchenko C00302240 |
+| Documentation | Gleb Tutubalin C00290944, Markus Mukiiza C00166672, Maksym Redchenko C00302240, Hamed Zon C00259228 |
+
 ## Sources
 
 - Hospital beds: Republic, [ESRI bed capacity report (2025)](https://esri.ie/publications/projections-of-regional-demand-and-bed-capacity-requirements-for-public-acute) and [Irish Times summary](https://www.irishtimes.com/health/2025/05/27/up-to-6800-more-inpatient-beds-will-be-needed-by-2040-says-esri-report); Northern Ireland, [NISRA inpatient statistics 2024/25](https://datavis.nisra.gov.uk/health/ni-inpatient-stats-24-25.html)
@@ -468,4 +477,3 @@ The maps are 380 × 480 pixels, 1 km per pixel, in an equal-area projection cent
 ## Credits
 
 Population: GHSL GHS-POP 2025, European Commission JRC (CC BY 4.0). Satellite: NASA Blue Marble. Coastlines, lakes and borders: Natural Earth. Counties in the Republic: © Tailte Éireann (CC BY 4.0). Counties in Northern Ireland: OSNI, Land & Property Services; contains public sector information licensed under the Open Government Licence v3.0.
-
