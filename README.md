@@ -477,3 +477,9 @@ The maps are 380 × 480 pixels, 1 km per pixel, in an equal-area projection cent
 ## Credits
 
 Population: GHSL GHS-POP 2025, European Commission JRC (CC BY 4.0). Satellite: NASA Blue Marble. Coastlines, lakes and borders: Natural Earth. Counties in the Republic: © Tailte Éireann (CC BY 4.0). Counties in Northern Ireland: OSNI, Land & Property Services; contains public sector information licensed under the Open Government Licence v3.0.
+
+## Licence
+
+Copyright (C) 2026 Gleb Tutubalin, Markus Mukiiza, Maksym Redchenko, Hamed Zon
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full terms.
